@@ -131,7 +131,7 @@ export function createStagePointerHandlers(params: {
     }
     const pointerId = getEventPointerId(e);
     capturePointer(pointerId);
-    if (e.button !== 0) {
+    if (typeof e.button === 'number' && e.button !== 0) {
       pointerState = {
         pointerId,
         mode: 'orbit',
@@ -188,7 +188,7 @@ export function createStagePointerHandlers(params: {
 
   const handlePointerMove = (e: PointerEvent) => {
     if (!pointerState || getEventPointerId(e) !== pointerState.pointerId) return;
-    if (e.pointerType === 'mouse' && e.buttons === 0) {
+    if (e.isTrusted && e.pointerType === 'mouse' && e.buttons === 0) {
       const activePointerId = pointerState.pointerId;
       pointerState = null;
       releaseCapturedPointer(activePointerId);
@@ -198,6 +198,7 @@ export function createStagePointerHandlers(params: {
     if (pointerState.mode === 'orbit') {
       const dx = e.clientX - pointerState.lastX;
       const dy = e.clientY - pointerState.lastY;
+      if (dx === 0 && dy === 0) return;
       pointerState.lastX = e.clientX;
       pointerState.lastY = e.clientY;
 
@@ -809,12 +810,18 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     };
 
     const domElem = renderer.domElement;
+    domElem.style.touchAction = 'none';
     domElem.addEventListener('webglcontextlost', handleContextLost);
     domElem.addEventListener('webglcontextrestored', handleContextRestored);
     domElem.addEventListener('contextmenu', handleContextMenu);
     domElem.addEventListener('pointerdown', handlePointerDown);
+    domElem.addEventListener('pointermove', handlePointerMove);
+    domElem.addEventListener('pointerup', handlePointerUp);
     domElem.addEventListener('pointercancel', handlePointerUp);
-    domElem.addEventListener('lostpointercapture', handlePointerUp);
+    container.addEventListener('pointerdown', handlePointerDown);
+    container.addEventListener('pointermove', handlePointerMove);
+    container.addEventListener('pointerup', handlePointerUp);
+    container.addEventListener('pointercancel', handlePointerUp);
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     window.addEventListener('pointercancel', handlePointerUp);
@@ -926,8 +933,13 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       domElem.removeEventListener('webglcontextrestored', handleContextRestored);
       domElem.removeEventListener('contextmenu', handleContextMenu);
       domElem.removeEventListener('pointerdown', handlePointerDown);
+      domElem.removeEventListener('pointermove', handlePointerMove);
+      domElem.removeEventListener('pointerup', handlePointerUp);
       domElem.removeEventListener('pointercancel', handlePointerUp);
-      domElem.removeEventListener('lostpointercapture', handlePointerUp);
+      container.removeEventListener('pointerdown', handlePointerDown);
+      container.removeEventListener('pointermove', handlePointerMove);
+      container.removeEventListener('pointerup', handlePointerUp);
+      container.removeEventListener('pointercancel', handlePointerUp);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);

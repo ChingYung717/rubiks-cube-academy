@@ -19,7 +19,6 @@ export interface SolveStats {
 interface PersistedSolveStats extends SolveStats {
   archivedCount: number;
   archivedBestTimeMs: number | null;
-  archivedIds: string[];
   recentIds?: string[];
 }
 
@@ -71,7 +70,7 @@ function isValidSolveRecord(item: unknown): item is SolveRecord {
 
 export function getEffectiveSolveTimeMs(record: SolveRecord): number | null {
   if (record.moveCount <= 0 || record.penalty === 'DNF') return null;
-  if (!Number.isFinite(record.timeMs) || record.timeMs < 0) return null;
+  if (!Number.isFinite(record.timeMs) || ! (record.timeMs >= 0)) return null;
   return record.timeMs + (record.penalty === '+2' ? 2000 : 0);
 }
 
@@ -120,7 +119,6 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
         bestTimeMs: windowStats.bestTimeMs,
         archivedCount: 0,
         archivedBestTimeMs: null,
-        archivedIds: [],
       };
     }
     const parsed = JSON.parse(raw);
@@ -130,7 +128,6 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
         bestTimeMs: windowStats.bestTimeMs,
         archivedCount: 0,
         archivedBestTimeMs: null,
-        archivedIds: [],
       };
     }
     const obj = parsed as Record<string, unknown>;
@@ -139,18 +136,26 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
       : undefined;
 
     if (recentIds !== undefined) {
-      const recentIdSet = new Set(recentIds);
-      const overlaps = recentRecords.some((r) => recentIdSet.has(r.id));
-      if (!overlaps || recentRecords.length < MAX_SOLVE_RECORDS) {
+      const matchesWindow =
+        recentRecords.length === MAX_SOLVE_RECORDS &&
+        recentIds.length === recentRecords.length &&
+        recentRecords.every((r, idx) => r.id === recentIds[idx]);
+      if (!matchesWindow) {
         return {
           totalSolves: windowStats.countableSolves,
           bestTimeMs: windowStats.bestTimeMs,
           archivedCount: 0,
           archivedBestTimeMs: null,
-          archivedIds: [],
           recentIds,
         };
       }
+    } else if (recentRecords.length < MAX_SOLVE_RECORDS) {
+      return {
+        totalSolves: windowStats.countableSolves,
+        bestTimeMs: windowStats.bestTimeMs,
+        archivedCount: 0,
+        archivedBestTimeMs: null,
+      };
     }
 
     const rawTotal =
@@ -180,16 +185,12 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
         : !hasExplicitArchive
           ? rawBest
           : null;
-    const archivedIds = Array.isArray(obj.archivedIds)
-      ? obj.archivedIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
-      : [];
 
     return {
       totalSolves: archivedCount + windowStats.countableSolves,
       bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
       archivedCount,
       archivedBestTimeMs,
-      archivedIds,
       recentIds,
     };
   } catch {
@@ -198,7 +199,6 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
       bestTimeMs: windowStats.bestTimeMs,
       archivedCount: 0,
       archivedBestTimeMs: null,
-      archivedIds: [],
     };
   }
 }
@@ -239,23 +239,24 @@ export function saveSolveRecords(records: SolveRecord[]): SolveRecord[] {
 
   try {
     const prevStored = readRawSolveRecords();
-    const prevStats = readRawPersistedStats(prevStored.slice(0, MAX_SOLVE_RECORDS));
-    const historyAnchorIds =
-      prevStats.recentIds && prevStats.recentIds.length > 0
-        ? prevStats.recentIds
-        : prevStored.map((r) => r.id);
-    const anchorSet = new Set(historyAnchorIds);
-    const sharesHistoryWithPrev =
-      valid.length >= MAX_SOLVE_RECORDS && valid.some((r) => anchorSet.has(r.id));
+    const prevStats = readRawPersistedStats(prevStored);
+    const isSameWindowUpdate =
+      prevStored.length === MAX_SOLVE_RECORDS &&
+      valid.length === MAX_SOLVE_RECORDS &&
+      valid.every((r, idx) => r.id === prevStored[idx].id);
+    const isIncrementalWindowAdvance =
+      prevStored.length === MAX_SOLVE_RECORDS &&
+      evicted.length > 0 &&
+      valid.length === MAX_SOLVE_RECORDS + evicted.length &&
+      valid
+        .slice(evicted.length)
+        .every((r, idx) => r.id === prevStored[idx].id && r.timeMs === prevStored[idx].timeMs);
+    const sharesHistoryWithPrev = isSameWindowUpdate || isIncrementalWindowAdvance;
 
     let archivedCount = sharesHistoryWithPrev ? prevStats.archivedCount : 0;
     let archivedBestTimeMs = sharesHistoryWithPrev ? prevStats.archivedBestTimeMs : null;
-    const archivedIds = sharesHistoryWithPrev ? [...prevStats.archivedIds] : [];
-    const prevArchivedIdSet = new Set(archivedIds);
 
     for (const r of evicted) {
-      if (prevArchivedIdSet.has(r.id)) continue;
-      archivedIds.push(r.id);
       if (r.moveCount > 0) {
         archivedCount += 1;
         const eff = getEffectiveSolveTimeMs(r);
@@ -271,7 +272,6 @@ export function saveSolveRecords(records: SolveRecord[]): SolveRecord[] {
       bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
       archivedCount,
       archivedBestTimeMs,
-      archivedIds,
       recentIds: recent.map((r) => r.id),
     };
 

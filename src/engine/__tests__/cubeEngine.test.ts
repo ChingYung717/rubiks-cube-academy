@@ -751,6 +751,46 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 1000,
       });
 
+      // Re-seeding localStorage with 51 records that reuse the exact same IDs ('solve_51'..'solve_1')
+      // but have a different oldest PB (2500ms instead of 1000ms) must NOT leak stale archived PB/count
+      const reseededSameIds51: SolveRecord[] = Array.from({ length: 51 }, (_, idx) => ({
+        id: `solve_${51 - idx}`,
+        timeMs: idx === 50 ? 2500 : 10000,
+        scramble: 'U',
+        createdAt: '12:03:00',
+        moveCount: 14,
+      }));
+      store['cubelab_solve_records_v1'] = JSON.stringify(reseededSameIds51);
+      expect(loadSolveRecords()).toHaveLength(50);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 2500,
+      });
+
+      // Calling saveSolveRecords twice with the same 51-record payload is idempotent
+      saveSolveRecords(reseededSameIds51);
+      saveSolveRecords(reseededSameIds51);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 2500,
+      });
+
+      // Replacing SOLVE_RECORDS externally with 50 records ('solve_50'..'solve_1', all 10000ms)
+      // invalidates the previous window's archived stats rather than leaking stale PB/count
+      const replaced50: SolveRecord[] = Array.from({ length: 50 }, (_, idx) => ({
+        id: `solve_${50 - idx}`,
+        timeMs: 10000,
+        scramble: 'R',
+        createdAt: '12:04:00',
+        moveCount: 15,
+      }));
+      store['cubelab_solve_records_v1'] = JSON.stringify(replaced50);
+      expect(loadSolveRecords()).toHaveLength(50);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 50,
+        bestTimeMs: 10000,
+      });
+
       // Clearing records resets both recent records and historical stats
       expect(saveSolveRecords([])).toEqual([]);
       expect(loadSolveRecords()).toEqual([]);
@@ -815,7 +855,8 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       type: string,
       pointerId: number,
       clientX: number,
-      clientY: number
+      clientY: number,
+      overrides?: Partial<PointerEvent>
     ): PointerEvent =>
       ({
         type,
@@ -823,8 +864,10 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         button: 0,
         buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1,
         pointerType: 'touch',
+        isTrusted: false,
         clientX,
         clientY,
+        ...overrides,
       }) as unknown as PointerEvent;
 
     // 1. First finger presses down at (100, 100)
@@ -849,14 +892,20 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(cameraSpherical.targetPhi).toBeCloseTo(1.0 - 20 * 0.0075, 6);
     expect(renderRequests).toBe(1);
 
+    // Duplicate bubbled move at same coordinates (140, 120) does not re-trigger render
+    handlers.handlePointerMove(makePointerEvent('pointermove', 1, 140, 120));
+    expect(renderRequests).toBe(1);
+
     // 5. Second finger lifts up / cancels -> must NOT interrupt finger 1
     handlers.handlePointerUp(makePointerEvent('pointerup', 2, 380, 380));
     handlers.handlePointerUp(makePointerEvent('pointercancel', 2, 380, 380));
     expect(handlers.getActivePointerId()).toBe(1);
     expect(capturedPointers.has(1)).toBe(true);
 
-    // 6. First finger continues moving to (160, 130) -> still responds normally
-    handlers.handlePointerMove(makePointerEvent('pointermove', 1, 160, 130));
+    // 6. First finger continues moving to (160, 130) (even with untrusted mouse buttons=0) -> still responds normally
+    handlers.handlePointerMove(
+      makePointerEvent('pointermove', 1, 160, 130, { pointerType: 'mouse', buttons: 0 })
+    );
     expect(cameraSpherical.targetTheta).toBeCloseTo(0.75 - 60 * 0.0075, 6);
     expect(cameraSpherical.targetPhi).toBeCloseTo(1.0 - 30 * 0.0075, 6);
 
@@ -889,8 +938,10 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     const sx = ((worldCenter.x + 1) * 0.5) * 600;
     const sy = ((-worldCenter.y + 1) * 0.5) * 600;
 
-    // Finger 1 presses on the sticker
-    handlers.handlePointerDown(makePointerEvent('pointerdown', 10, sx, sy));
+    // Finger 1 presses on the sticker (even when synthetic event omits button property)
+    handlers.handlePointerDown(
+      makePointerEvent('pointerdown', 10, sx, sy, { button: undefined as unknown as number })
+    );
     expect(handlers.getActivePointerId()).toBe(10);
 
     // Finger 2 presses and drags violently -> must not trigger a sticker move or cancel finger 1
