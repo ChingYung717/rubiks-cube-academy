@@ -87,7 +87,23 @@ const INTERACTIVE_ROLES = new Set([
 export function isInteractiveOrEditableTarget(target: EventTarget | null): boolean {
   if (!target || typeof target !== 'object') return false;
 
-  const maybeEl = target as {
+  const rawTarget = target as {
+    tagName?: string;
+    parentElement?: unknown;
+    parentNode?: unknown;
+    activeElement?: EventTarget | null;
+  };
+  const resolvedTarget =
+    rawTarget === (globalThis as { window?: unknown }).window ||
+    rawTarget === (globalThis as { document?: unknown }).document ||
+    (!rawTarget.tagName && !rawTarget.parentElement && !rawTarget.parentNode && rawTarget.activeElement)
+      ? rawTarget.activeElement ??
+        (typeof document !== 'undefined' ? document.activeElement : null) ??
+        target
+      : target;
+  if (!resolvedTarget || typeof resolvedTarget !== 'object') return false;
+
+  const maybeEl = resolvedTarget as {
     tagName?: string;
     isContentEditable?: boolean;
     getAttribute?: (name: string) => string | null;

@@ -92,7 +92,7 @@ export function isValidPlaybackSpeed(val: unknown): val is PlaybackSpeed {
 const TIME_STRING_RE =
   /^(?:(?:上午|下午|凌晨|早上|清晨|中午|傍晚|晚上|AM|PM|am|pm)\s*)?(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:\s*(?:AM|PM|am|pm))?$/;
 const ISO_DATE_PREFIX_RE =
-  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:[T\s](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?(?:Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?)?$/;
 const SCRAMBLE_TOKEN_RE = /^(?:[RLUDFBMESxyz]|[RLUDFB]w|[rludfb])(?:2['’′]?|['’′]2|['’′])?$/;
 
 export function isValidCreatedAt(value: unknown): value is string {
@@ -101,7 +101,19 @@ export function isValidCreatedAt(value: unknown): value is string {
   if (!trimmed || value.length > MAX_CREATED_AT_LENGTH) return false;
   if (/[\u0000-\u001f]/.test(value)) return false;
   if (TIME_STRING_RE.test(trimmed)) return true;
-  if (ISO_DATE_PREFIX_RE.test(trimmed)) {
+  const isoMatch = ISO_DATE_PREFIX_RE.exec(trimmed);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    if (
+      utcDate.getUTCFullYear() !== year ||
+      utcDate.getUTCMonth() !== month - 1 ||
+      utcDate.getUTCDate() !== day
+    ) {
+      return false;
+    }
     const parsed = Date.parse(trimmed);
     return Number.isFinite(parsed);
   }
@@ -485,7 +497,7 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
     prevStored.length > 0 &&
     prevStored.length <= MAX_SOLVE_RECORDS
   ) {
-    for (let k = 0; k < valid.length; k++) {
+    for (let k = 1; k < valid.length; k++) {
       const overlapLen = Math.min(valid.length - k, prevStored.length);
       if (overlapLen <= 0) break;
       let matches = true;

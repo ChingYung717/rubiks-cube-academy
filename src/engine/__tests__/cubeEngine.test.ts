@@ -788,6 +788,18 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 2500,
       });
 
+      // Calling saveSolveRecords directly (without overwriting localStorage first) with a 51-record
+      // array whose top 50 match prevStored ('solve_51'..'solve_2') but whose 51st record ('solve_1')
+      // has a different timeMs (3200ms) replaces the dataset cleanly instead of double-counting to 52
+      const directReseed51: SolveRecord[] = reseededSameIds51.map((r, idx) =>
+        idx === 50 ? { ...r, timeMs: 3200 } : r
+      );
+      saveSolveRecords(directReseed51);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 3200,
+      });
+
       // Replacing SOLVE_RECORDS externally with 50 records ('solve_50'..'solve_1', all 10000ms)
       // invalidates the previous window's archived stats rather than leaking stale PB/count
       const replaced50: SolveRecord[] = Array.from({ length: 50 }, (_, idx) => ({
@@ -1283,9 +1295,10 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       expect(isValidSolveRecord({ ...baseValid, createdAt: '凌晨01:05:00' })).toBe(true);
       expect(isValidSolveRecord({ ...baseValid, createdAt: '02:30:05 PM' })).toBe(true);
       expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-11-07T10:12:27Z' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2024-02-29' })).toBe(true);
       expect(isValidSolveRecord({ ...baseValid, version: 1 })).toBe(true);
 
-      // Invalid records rejected
+      // Invalid records rejected (including calendar rollover dates & out-of-range ISO times)
       expect(isValidSolveRecord({ ...baseValid, id: '' })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, id: 'x'.repeat(129) })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, scramble: 'R '.repeat(300) })).toBe(false);
@@ -1293,6 +1306,10 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       expect(isValidSolveRecord({ ...baseValid, createdAt: '99:99:99' })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, createdAt: 'not-a-valid-date' })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-13-45' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-02-29' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-02-31' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-04-31' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-11-07 25:00:00' })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, timeMs: 0 })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, moveCount: -1 })).toBe(false);
       expect(isValidSolveRecord({ ...baseValid, version: 99 })).toBe(false);
@@ -1316,6 +1333,18 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     for (const tag of ['BUTTON', 'A', 'SELECT', 'INPUT', 'TEXTAREA', 'SUMMARY', 'OPTION', 'DIALOG']) {
       expect(isInteractiveOrEditableTarget({ tagName: tag } as unknown as EventTarget)).toBe(true);
     }
+
+    // Document / Window target with activeElement pointing to an interactive control returns true
+    expect(
+      isInteractiveOrEditableTarget({
+        activeElement: { tagName: 'BUTTON' },
+      } as unknown as EventTarget)
+    ).toBe(true);
+    expect(
+      isInteractiveOrEditableTarget({
+        activeElement: { tagName: 'MAIN' },
+      } as unknown as EventTarget)
+    ).toBe(false);
 
     // ARIA interactive roles return true
     for (const role of [
