@@ -1,7 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { LAYER_BY_LAYER_STEPS, LESSONS, Lesson, YELLOW_CROSS_CASES, YellowCrossCase } from '../data/curriculum';
 import { getMoveDefinition, invertMove, parseAlgorithm } from '../engine/cubeEngine';
-import { SolvePenalty, SolveRecord, computeAo5, formatTimeMs } from '../utils/storage';
+import {
+  MAX_SOLVE_RECORDS,
+  SolvePenalty,
+  SolveRecord,
+  SolveStats,
+  computeAo5,
+  formatTimeMs,
+  getEffectiveSolveTimeMs,
+} from '../utils/storage';
 import {
   AlertTriangle,
   ArrowRight,
@@ -58,6 +66,7 @@ interface RightWorkbenchPanelProps {
   timerElapsedMs: number;
   sandboxMoveHistory: string[];
   solveRecords: SolveRecord[];
+  solveStats?: SolveStats;
   onGenerateNewScramble: () => void;
   onResetSandboxCube: () => void;
   onToggleTimer: () => void;
@@ -180,6 +189,7 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
   timerElapsedMs,
   sandboxMoveHistory,
   solveRecords,
+  solveStats,
   onGenerateNewScramble,
   onResetSandboxCube,
   onToggleTimer,
@@ -199,15 +209,18 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
       : null;
 
   const countableRecords = solveRecords.filter((record) => record.moveCount > 0);
-  const validTimedRecords = countableRecords.filter((record) => record.penalty !== 'DNF');
+  const validTimedRecords = countableRecords
+    .map((record) => getEffectiveSolveTimeMs(record))
+    .filter((ms): ms is number => ms !== null);
+  const windowBestRecord =
+    validTimedRecords.length > 0 ? Math.min(...validTimedRecords) : null;
   const bestRecord =
-    validTimedRecords.length > 0
-      ? Math.min(
-          ...validTimedRecords.map(
-            (record) => record.timeMs + (record.penalty === '+2' ? 2000 : 0)
-          )
-        )
-      : null;
+    solveStats !== undefined ? solveStats.bestTimeMs : windowBestRecord;
+  const totalSolveCount =
+    solveStats?.totalSolves !== undefined
+      ? Math.max(solveStats.totalSolves, countableRecords.length)
+      : countableRecords.length;
+  const latestSolveNumber = Math.max(solveRecords.length, totalSolveCount);
   const ao5Ms = computeAo5(countableRecords);
 
   const asideRef = useRef<HTMLElement | null>(null);
@@ -372,9 +385,9 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
               <Trophy className="w-4 h-4 text-amber-400" />
-              <span>个人速拧战绩榜 (本地存储)</span>
+              <span>个人速拧战绩榜 (本地存储 · 最近 {MAX_SOLVE_RECORDS} 条)</span>
             </span>
-            {solveRecords.length > 0 && (
+            {(solveRecords.length > 0 || totalSolveCount > 0) && (
               confirmingClear ? (
                 <div className="flex items-center gap-1.5">
                   <button
@@ -408,7 +421,10 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
           <div className="grid grid-cols-3 gap-2">
             <div className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 text-center">
               <div className="text-[10px] text-slate-400">PB 最佳单次</div>
-              <div className="font-mono text-sm font-bold text-amber-300 mt-0.5">
+              <div
+                data-testid="sandbox-pb-display"
+                className="font-mono text-sm font-bold text-amber-300 mt-0.5"
+              >
                 {bestRecord !== null ? formatTimeMs(bestRecord) : '--'}
               </div>
             </div>
@@ -425,8 +441,11 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
             </div>
             <div className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 text-center">
               <div className="text-[10px] text-slate-400">累计还原</div>
-              <div className="font-mono text-sm font-bold text-emerald-300 mt-0.5">
-                {countableRecords.length} 次
+              <div
+                data-testid="sandbox-total-solves-display"
+                className="font-mono text-sm font-bold text-emerald-300 mt-0.5"
+              >
+                {totalSolveCount} 次
               </div>
             </div>
           </div>
@@ -444,7 +463,7 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
                     key={rec.id}
                     className="flex items-center justify-between gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/75 border border-slate-800/80 text-xs"
                   >
-                    <span className="font-mono text-slate-400">#{solveRecords.length - idx}</span>
+                    <span className="font-mono text-slate-400">#{latestSolveNumber - idx}</span>
                     <span
                       className={`font-mono font-bold ${
                         rec.penalty === 'DNF'

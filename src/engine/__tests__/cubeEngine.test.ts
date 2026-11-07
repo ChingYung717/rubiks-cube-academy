@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import {
   applyAlgorithm,
   applyMove,
@@ -23,12 +24,17 @@ import {
   getLessonInitialCube,
 } from '../../data/curriculum';
 import {
+  MAX_SOLVE_RECORDS,
+  SolveRecord,
   computeAo5,
   formatTimeMs,
   loadCompletedLessons,
   loadSettings,
   loadSolveRecords,
+  loadSolveStats,
+  saveSolveRecords,
 } from '../../utils/storage';
+import { createStagePointerHandlers } from '../../components/Cube3DStage';
 import {
   formatCubeCommentaryForSpeech,
   narrationEngine,
@@ -653,5 +659,253 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         configurable: true,
       });
     }
+  });
+
+  it('preserves cumulative solve count and personal best (PB) across >50 records and simulated page reloads', () => {
+    const store: Record<string, string> = {};
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => {
+          store[k] = v;
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      // Simulate 51 incremental solves where solve #1 is a 1.00s (1000ms) PB and solves #2..#51 are 10.00s (10000ms)
+      let inMemoryRecords: SolveRecord[] = [];
+      for (let i = 1; i <= 51; i++) {
+        const rec: SolveRecord = {
+          id: `solve_${i}`,
+          timeMs: i === 1 ? 1000 : 10000,
+          scramble: 'R U R\' U\'',
+          createdAt: '12:00:00',
+          moveCount: 20,
+        };
+        inMemoryRecords = saveSolveRecords([rec, ...inMemoryRecords]);
+      }
+
+      // In-memory and persisted records are unified at MAX_SOLVE_RECORDS (50)
+      expect(inMemoryRecords).toHaveLength(MAX_SOLVE_RECORDS);
+      expect(inMemoryRecords[0].id).toBe('solve_51');
+      expect(inMemoryRecords[inMemoryRecords.length - 1].id).toBe('solve_2');
+
+      const statsBeforeReload = loadSolveStats();
+      expect(statsBeforeReload.totalSolves).toBe(51);
+      expect(statsBeforeReload.bestTimeMs).toBe(1000);
+
+      // Simulate page refresh: re-read from localStorage
+      const reloadedRecords = loadSolveRecords();
+      const statsAfterReload = loadSolveStats();
+      expect(reloadedRecords).toEqual(inMemoryRecords);
+      expect(statsAfterReload).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 1000,
+      });
+
+      // Add a 52nd solve with a faster 0.80s (800ms) PB
+      const solve52: SolveRecord = {
+        id: 'solve_52',
+        timeMs: 800,
+        scramble: 'F R U R\' U\' F\'',
+        createdAt: '12:01:00',
+        moveCount: 18,
+      };
+      inMemoryRecords = saveSolveRecords([solve52, ...reloadedRecords]);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 52,
+        bestTimeMs: 800,
+      });
+
+      // Toggle +2 penalty on solve_52 (800ms + 2000ms = 2800ms) -> PB falls back to archived 1000ms from solve_1!
+      inMemoryRecords = saveSolveRecords(
+        inMemoryRecords.map((r) => (r.id === 'solve_52' ? { ...r, penalty: '+2' as const } : r))
+      );
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 52,
+        bestTimeMs: 1000,
+      });
+
+      // Direct 51-record payload seeded into localStorage is normalized on load while keeping PB & total count
+      const seeded51: SolveRecord[] = Array.from({ length: 51 }, (_, idx) => ({
+        id: `seeded_${51 - idx}`,
+        timeMs: idx === 50 ? 1000 : 10000,
+        scramble: 'U',
+        createdAt: '12:02:00',
+        moveCount: 12,
+      }));
+      store['cubelab_solve_records_v1'] = JSON.stringify(seeded51);
+      const loadedFromSeed = loadSolveRecords();
+      expect(loadedFromSeed).toHaveLength(50);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 1000,
+      });
+      // Second reload remains identical
+      expect(loadSolveRecords()).toHaveLength(50);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 1000,
+      });
+
+      // Clearing records resets both recent records and historical stats
+      expect(saveSolveRecords([])).toEqual([]);
+      expect(loadSolveRecords()).toEqual([]);
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 0,
+        bestTimeMs: null,
+      });
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: origStorage,
+        configurable: true,
+      });
+    }
+  });
+
+  it('isolates single active pointer and rejects multi-touch pointer interference in Cube3DStage', () => {
+    const capturedPointers = new Set<number>();
+    const domElement = {
+      clientWidth: 600,
+      clientHeight: 600,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 600 }),
+      setPointerCapture: (id: number) => {
+        capturedPointers.add(id);
+      },
+      hasPointerCapture: (id: number) => capturedPointers.has(id),
+      releasePointerCapture: (id: number) => {
+        capturedPointers.delete(id);
+      },
+    };
+
+    const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+    camera.position.set(4, 4, 5);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+
+    const rootGroup = new THREE.Group();
+    const cameraSpherical = {
+      radius: 7.4,
+      theta: 0.75,
+      phi: 1.0,
+      targetTheta: 0.75,
+      targetPhi: 1.0,
+    };
+    const triggeredMoves: string[] = [];
+    let renderRequests = 0;
+
+    const handlers = createStagePointerHandlers({
+      domElement,
+      camera,
+      rootGroup,
+      cameraSpherical,
+      isAnimating: () => false,
+      onRequestRender: () => {
+        renderRequests += 1;
+      },
+      onUserMove: (token) => {
+        triggeredMoves.push(token);
+      },
+    });
+
+    const makePointerEvent = (
+      type: string,
+      pointerId: number,
+      clientX: number,
+      clientY: number
+    ): PointerEvent =>
+      ({
+        type,
+        pointerId,
+        button: 0,
+        buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1,
+        pointerType: 'touch',
+        clientX,
+        clientY,
+      }) as unknown as PointerEvent;
+
+    // 1. First finger presses down at (100, 100)
+    handlers.handlePointerDown(makePointerEvent('pointerdown', 1, 100, 100));
+    expect(handlers.getActivePointerId()).toBe(1);
+    expect(capturedPointers.has(1)).toBe(true);
+
+    // 2. Second finger presses down at (300, 300) -> must NOT overwrite active pointer 1
+    handlers.handlePointerDown(makePointerEvent('pointerdown', 2, 300, 300));
+    expect(handlers.getActivePointerId()).toBe(1);
+    expect(capturedPointers.has(2)).toBe(false);
+
+    // 3. Second finger moves -> must be ignored without jumping camera
+    handlers.handlePointerMove(makePointerEvent('pointermove', 2, 380, 380));
+    expect(cameraSpherical.targetTheta).toBeCloseTo(0.75, 6);
+    expect(cameraSpherical.targetPhi).toBeCloseTo(1.0, 6);
+    expect(renderRequests).toBe(0);
+
+    // 4. First finger moves to (140, 120) -> smoothly rotates camera using finger 1's own delta (40, 20)
+    handlers.handlePointerMove(makePointerEvent('pointermove', 1, 140, 120));
+    expect(cameraSpherical.targetTheta).toBeCloseTo(0.75 - 40 * 0.0075, 6);
+    expect(cameraSpherical.targetPhi).toBeCloseTo(1.0 - 20 * 0.0075, 6);
+    expect(renderRequests).toBe(1);
+
+    // 5. Second finger lifts up / cancels -> must NOT interrupt finger 1
+    handlers.handlePointerUp(makePointerEvent('pointerup', 2, 380, 380));
+    handlers.handlePointerUp(makePointerEvent('pointercancel', 2, 380, 380));
+    expect(handlers.getActivePointerId()).toBe(1);
+    expect(capturedPointers.has(1)).toBe(true);
+
+    // 6. First finger continues moving to (160, 130) -> still responds normally
+    handlers.handlePointerMove(makePointerEvent('pointermove', 1, 160, 130));
+    expect(cameraSpherical.targetTheta).toBeCloseTo(0.75 - 60 * 0.0075, 6);
+    expect(cameraSpherical.targetPhi).toBeCloseTo(1.0 - 30 * 0.0075, 6);
+
+    // 7. First finger lifts up -> releases capture and clears active pointer
+    handlers.handlePointerUp(makePointerEvent('pointerup', 1, 160, 130));
+    expect(handlers.getActivePointerId()).toBeNull();
+    expect(capturedPointers.has(1)).toBe(false);
+
+    // 8. Second finger moving after finger 1 lifted up does nothing
+    handlers.handlePointerMove(makePointerEvent('pointermove', 2, 400, 400));
+    expect(cameraSpherical.targetTheta).toBeCloseTo(0.75 - 60 * 0.0075, 6);
+    expect(triggeredMoves).toHaveLength(0);
+
+    // 9. Sticker drag mode: add a front-face sticker at cubie (1, 0, 1) facing +Z
+    const cubieGroup = new THREE.Group();
+    cubieGroup.position.set(1, 0, 1);
+    cubieGroup.userData = { cubieId: '1,0,1', pos: [1, 0, 1] };
+    const stickerMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(4, 4),
+      new THREE.MeshBasicMaterial()
+    );
+    stickerMesh.position.set(0, 0, 0.472);
+    stickerMesh.userData = { faceDir: 'F', cubieId: '1,0,1' };
+    cubieGroup.add(stickerMesh);
+    rootGroup.add(cubieGroup);
+    rootGroup.updateMatrixWorld(true);
+
+    // Project sticker center to screen coordinates
+    const worldCenter = new THREE.Vector3(1, 0, 1.472).project(camera);
+    const sx = ((worldCenter.x + 1) * 0.5) * 600;
+    const sy = ((-worldCenter.y + 1) * 0.5) * 600;
+
+    // Finger 1 presses on the sticker
+    handlers.handlePointerDown(makePointerEvent('pointerdown', 10, sx, sy));
+    expect(handlers.getActivePointerId()).toBe(10);
+
+    // Finger 2 presses and drags violently -> must not trigger a sticker move or cancel finger 1
+    handlers.handlePointerDown(makePointerEvent('pointerdown', 20, sx, sy));
+    handlers.handlePointerMove(makePointerEvent('pointermove', 20, sx, sy - 80));
+    handlers.handlePointerUp(makePointerEvent('pointerup', 20, sx, sy - 80));
+    expect(triggeredMoves).toHaveLength(0);
+    expect(handlers.getActivePointerId()).toBe(10);
+
+    // Finger 1 drags upward on the sticker -> triggers layer move on right column ('R')
+    handlers.handlePointerMove(makePointerEvent('pointermove', 10, sx, sy - 60));
+    expect(triggeredMoves).toEqual(['R']);
+
+    // Finger 1 cancels/releases -> clears active pointer
+    handlers.handlePointerUp(makePointerEvent('pointercancel', 10, sx, sy - 60));
+    expect(handlers.getActivePointerId()).toBeNull();
   });
 });

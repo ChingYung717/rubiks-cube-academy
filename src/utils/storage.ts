@@ -1,3 +1,5 @@
+export const MAX_SOLVE_RECORDS = 50;
+
 export type SolvePenalty = 'none' | '+2' | 'DNF';
 
 export interface SolveRecord {
@@ -7,6 +9,18 @@ export interface SolveRecord {
   createdAt: string;
   moveCount: number;
   penalty?: SolvePenalty;
+}
+
+export interface SolveStats {
+  totalSolves: number;
+  bestTimeMs: number | null;
+}
+
+interface PersistedSolveStats extends SolveStats {
+  archivedCount: number;
+  archivedBestTimeMs: number | null;
+  archivedIds: string[];
+  recentIds?: string[];
 }
 
 export interface PersistedSettings {
@@ -21,6 +35,7 @@ export interface PersistedSettings {
 const KEYS = {
   COMPLETED_LESSONS: 'cubelab_completed_lessons_v1',
   SOLVE_RECORDS: 'cubelab_solve_records_v1',
+  SOLVE_STATS: 'cubelab_solve_stats_v1',
   SETTINGS: 'cubelab_settings_v1',
 };
 
@@ -54,6 +69,140 @@ function isValidSolveRecord(item: unknown): item is SolveRecord {
   return true;
 }
 
+export function getEffectiveSolveTimeMs(record: SolveRecord): number | null {
+  if (record.moveCount <= 0 || record.penalty === 'DNF') return null;
+  if (!Number.isFinite(record.timeMs) || record.timeMs < 0) return null;
+  return record.timeMs + (record.penalty === '+2' ? 2000 : 0);
+}
+
+function minNonNull(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+function computeWindowStats(records: SolveRecord[]): {
+  countableSolves: number;
+  bestTimeMs: number | null;
+} {
+  let countableSolves = 0;
+  let bestTimeMs: number | null = null;
+  for (const r of records) {
+    if (r.moveCount > 0) {
+      countableSolves += 1;
+      const eff = getEffectiveSolveTimeMs(r);
+      if (eff !== null) {
+        bestTimeMs = minNonNull(bestTimeMs, eff);
+      }
+    }
+  }
+  return { countableSolves, bestTimeMs };
+}
+
+function readRawSolveRecords(): SolveRecord[] {
+  try {
+    const raw = localStorage.getItem(KEYS.SOLVE_RECORDS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isValidSolveRecord) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStats {
+  const windowStats = computeWindowStats(recentRecords);
+  try {
+    const raw = localStorage.getItem(KEYS.SOLVE_STATS);
+    if (!raw) {
+      return {
+        totalSolves: windowStats.countableSolves,
+        bestTimeMs: windowStats.bestTimeMs,
+        archivedCount: 0,
+        archivedBestTimeMs: null,
+        archivedIds: [],
+      };
+    }
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return {
+        totalSolves: windowStats.countableSolves,
+        bestTimeMs: windowStats.bestTimeMs,
+        archivedCount: 0,
+        archivedBestTimeMs: null,
+        archivedIds: [],
+      };
+    }
+    const obj = parsed as Record<string, unknown>;
+    const recentIds = Array.isArray(obj.recentIds)
+      ? obj.recentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : undefined;
+
+    if (recentIds !== undefined) {
+      const recentIdSet = new Set(recentIds);
+      const overlaps = recentRecords.some((r) => recentIdSet.has(r.id));
+      if (!overlaps || recentRecords.length < MAX_SOLVE_RECORDS) {
+        return {
+          totalSolves: windowStats.countableSolves,
+          bestTimeMs: windowStats.bestTimeMs,
+          archivedCount: 0,
+          archivedBestTimeMs: null,
+          archivedIds: [],
+          recentIds,
+        };
+      }
+    }
+
+    const rawTotal =
+      typeof obj.totalSolves === 'number' &&
+      Number.isFinite(obj.totalSolves) &&
+      obj.totalSolves >= 0
+        ? Math.floor(obj.totalSolves)
+        : windowStats.countableSolves;
+    const rawBest =
+      typeof obj.bestTimeMs === 'number' &&
+      Number.isFinite(obj.bestTimeMs) &&
+      obj.bestTimeMs >= 0
+        ? obj.bestTimeMs
+        : null;
+    const hasExplicitArchive =
+      typeof obj.archivedCount === 'number' &&
+      Number.isFinite(obj.archivedCount) &&
+      obj.archivedCount >= 0;
+    const archivedCount = hasExplicitArchive
+      ? Math.floor(obj.archivedCount as number)
+      : Math.max(0, rawTotal - windowStats.countableSolves);
+    const archivedBestTimeMs =
+      typeof obj.archivedBestTimeMs === 'number' &&
+      Number.isFinite(obj.archivedBestTimeMs) &&
+      obj.archivedBestTimeMs >= 0
+        ? obj.archivedBestTimeMs
+        : !hasExplicitArchive
+          ? rawBest
+          : null;
+    const archivedIds = Array.isArray(obj.archivedIds)
+      ? obj.archivedIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+
+    return {
+      totalSolves: archivedCount + windowStats.countableSolves,
+      bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
+      archivedCount,
+      archivedBestTimeMs,
+      archivedIds,
+      recentIds,
+    };
+  } catch {
+    return {
+      totalSolves: windowStats.countableSolves,
+      bestTimeMs: windowStats.bestTimeMs,
+      archivedCount: 0,
+      archivedBestTimeMs: null,
+      archivedIds: [],
+    };
+  }
+}
+
 export function loadCompletedLessons(): string[] {
   try {
     const raw = localStorage.getItem(KEYS.COMPLETED_LESSONS);
@@ -76,22 +225,76 @@ export function saveCompletedLessons(lessonIds: string[]): void {
 }
 
 export function loadSolveRecords(): SolveRecord[] {
-  try {
-    const raw = localStorage.getItem(KEYS.SOLVE_RECORDS);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter(isValidSolveRecord) : [];
-  } catch {
-    return [];
+  const rawRecords = readRawSolveRecords();
+  if (rawRecords.length > MAX_SOLVE_RECORDS) {
+    return saveSolveRecords(rawRecords);
   }
+  return rawRecords;
 }
 
-export function saveSolveRecords(records: SolveRecord[]): void {
+export function saveSolveRecords(records: SolveRecord[]): SolveRecord[] {
+  const valid = Array.isArray(records) ? records.filter(isValidSolveRecord) : [];
+  const recent = valid.slice(0, MAX_SOLVE_RECORDS);
+  const evicted = valid.slice(MAX_SOLVE_RECORDS);
+
   try {
-    localStorage.setItem(KEYS.SOLVE_RECORDS, JSON.stringify(records.slice(0, 50)));
+    const prevStored = readRawSolveRecords();
+    const prevStats = readRawPersistedStats(prevStored.slice(0, MAX_SOLVE_RECORDS));
+    const historyAnchorIds =
+      prevStats.recentIds && prevStats.recentIds.length > 0
+        ? prevStats.recentIds
+        : prevStored.map((r) => r.id);
+    const anchorSet = new Set(historyAnchorIds);
+    const sharesHistoryWithPrev =
+      valid.length >= MAX_SOLVE_RECORDS && valid.some((r) => anchorSet.has(r.id));
+
+    let archivedCount = sharesHistoryWithPrev ? prevStats.archivedCount : 0;
+    let archivedBestTimeMs = sharesHistoryWithPrev ? prevStats.archivedBestTimeMs : null;
+    const archivedIds = sharesHistoryWithPrev ? [...prevStats.archivedIds] : [];
+    const prevArchivedIdSet = new Set(archivedIds);
+
+    for (const r of evicted) {
+      if (prevArchivedIdSet.has(r.id)) continue;
+      archivedIds.push(r.id);
+      if (r.moveCount > 0) {
+        archivedCount += 1;
+        const eff = getEffectiveSolveTimeMs(r);
+        if (eff !== null) {
+          archivedBestTimeMs = minNonNull(archivedBestTimeMs, eff);
+        }
+      }
+    }
+
+    const windowStats = computeWindowStats(recent);
+    const nextStats: PersistedSolveStats = {
+      totalSolves: archivedCount + windowStats.countableSolves,
+      bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
+      archivedCount,
+      archivedBestTimeMs,
+      archivedIds,
+      recentIds: recent.map((r) => r.id),
+    };
+
+    localStorage.setItem(KEYS.SOLVE_RECORDS, JSON.stringify(recent));
+    localStorage.setItem(KEYS.SOLVE_STATS, JSON.stringify(nextStats));
   } catch {
     // ignore
   }
+
+  return recent;
+}
+
+export function loadSolveStats(): SolveStats {
+  const rawRecords = readRawSolveRecords();
+  const recent =
+    rawRecords.length > MAX_SOLVE_RECORDS
+      ? saveSolveRecords(rawRecords)
+      : rawRecords;
+  const stats = readRawPersistedStats(recent);
+  return {
+    totalSolves: stats.totalSolves,
+    bestTimeMs: stats.bestTimeMs,
+  };
 }
 
 export function loadSettings(): PersistedSettings {

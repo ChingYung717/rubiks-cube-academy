@@ -46,6 +46,311 @@ const FACE_NORMALS: Record<FaceDir, THREE.Vector3> = {
   B: new THREE.Vector3(0, 0, -1),
 };
 
+export interface StagePointerDomElement {
+  getBoundingClientRect: () => { left: number; top: number; width: number; height: number };
+  clientWidth: number;
+  clientHeight: number;
+  setPointerCapture?: (pointerId: number) => void;
+  hasPointerCapture?: (pointerId: number) => boolean;
+  releasePointerCapture?: (pointerId: number) => void;
+}
+
+export interface StageCameraSpherical {
+  radius: number;
+  theta: number;
+  phi: number;
+  targetTheta: number;
+  targetPhi: number;
+}
+
+export function createStagePointerHandlers(params: {
+  domElement: StagePointerDomElement;
+  camera: THREE.PerspectiveCamera;
+  rootGroup: THREE.Group;
+  cameraSpherical: StageCameraSpherical;
+  isAnimating: () => boolean;
+  onRequestRender: () => void;
+  onUserMove: (moveToken: string) => void;
+}) {
+  const {
+    domElement,
+    camera,
+    rootGroup,
+    cameraSpherical,
+    isAnimating,
+    onRequestRender,
+    onUserMove,
+  } = params;
+
+  const raycaster = new THREE.Raycaster();
+  let pointerState: {
+    pointerId: number;
+    mode: 'orbit' | 'sticker';
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    cubiePos?: [number, number, number];
+    faceDir?: FaceDir;
+    hitPoint?: THREE.Vector3;
+    moveTriggered?: boolean;
+  } | null = null;
+
+  const getEventPointerId = (e: Pick<PointerEvent, 'pointerId'>): number =>
+    typeof e.pointerId === 'number' ? e.pointerId : 0;
+
+  const getNormalizedMouse = (clientX: number, clientY: number) => {
+    const rect = domElement.getBoundingClientRect();
+    return new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+  };
+
+  const capturePointer = (pointerId: number) => {
+    try {
+      domElement.setPointerCapture?.(pointerId);
+    } catch {
+      // ignore synthetic events where pointerId is not active
+    }
+  };
+
+  const releaseCapturedPointer = (pointerId: number) => {
+    try {
+      if (domElement.hasPointerCapture?.(pointerId)) {
+        domElement.releasePointerCapture?.(pointerId);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handlePointerDown = (e: PointerEvent) => {
+    if (pointerState !== null) {
+      return;
+    }
+    const pointerId = getEventPointerId(e);
+    capturePointer(pointerId);
+    if (e.button !== 0) {
+      pointerState = {
+        pointerId,
+        mode: 'orbit',
+        startX: e.clientX,
+        startY: e.clientY,
+        lastX: e.clientX,
+        lastY: e.clientY,
+      };
+      return;
+    }
+
+    const mouse = getNormalizedMouse(e.clientX, e.clientY);
+    raycaster.setFromCamera(mouse, camera);
+
+    const allMeshes: THREE.Object3D[] = [];
+    rootGroup.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh && obj.userData?.faceDir) {
+        allMeshes.push(obj);
+      }
+    });
+
+    const hits = raycaster.intersectObjects(allMeshes, false);
+    if (hits.length > 0 && !isAnimating()) {
+      const hitObj = hits[0].object;
+      const faceDir = hitObj.userData.faceDir as FaceDir;
+      const parentGroup = hitObj.parent;
+      const cubiePos = parentGroup?.userData?.pos as [number, number, number] | undefined;
+      if (faceDir && cubiePos) {
+        pointerState = {
+          pointerId,
+          mode: 'sticker',
+          startX: e.clientX,
+          startY: e.clientY,
+          lastX: e.clientX,
+          lastY: e.clientY,
+          cubiePos,
+          faceDir,
+          hitPoint: hits[0].point.clone(),
+          moveTriggered: false,
+        };
+        return;
+      }
+    }
+
+    pointerState = {
+      pointerId,
+      mode: 'orbit',
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+    };
+  };
+
+  const handlePointerMove = (e: PointerEvent) => {
+    if (!pointerState || getEventPointerId(e) !== pointerState.pointerId) return;
+    if (e.pointerType === 'mouse' && e.buttons === 0) {
+      const activePointerId = pointerState.pointerId;
+      pointerState = null;
+      releaseCapturedPointer(activePointerId);
+      return;
+    }
+
+    if (pointerState.mode === 'orbit') {
+      const dx = e.clientX - pointerState.lastX;
+      const dy = e.clientY - pointerState.lastY;
+      pointerState.lastX = e.clientX;
+      pointerState.lastY = e.clientY;
+
+      cameraSpherical.targetTheta -= dx * 0.0075;
+      cameraSpherical.targetPhi = Math.max(
+        0.22,
+        Math.min(Math.PI - 0.22, cameraSpherical.targetPhi - dy * 0.0075)
+      );
+      onRequestRender();
+      return;
+    }
+
+    if (pointerState.mode === 'sticker' && !pointerState.moveTriggered) {
+      const dx = e.clientX - pointerState.startX;
+      const dy = e.clientY - pointerState.startY;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 16) return;
+
+      pointerState.moveTriggered = true;
+      const { cubiePos, faceDir, hitPoint } = pointerState;
+      if (!cubiePos || !faceDir) return;
+
+      const normal = FACE_NORMALS[faceDir];
+      // Candidate world tangent axes perpendicular to face normal
+      const allWorldAxes: { vec: THREE.Vector3; name: 'x' | 'y' | 'z' }[] = [
+        { vec: new THREE.Vector3(1, 0, 0), name: 'x' },
+        { vec: new THREE.Vector3(0, 1, 0), name: 'y' },
+        { vec: new THREE.Vector3(0, 0, 1), name: 'z' },
+      ];
+      const worldAxes = allWorldAxes.filter((a) => Math.abs(a.vec.dot(normal)) < 0.1);
+
+      const anchorPoint =
+        hitPoint ??
+        new THREE.Vector3(...cubiePos).add(normal.clone().multiplyScalar(0.472));
+
+      let bestAxis = worldAxes[0];
+      let bestSign = 1;
+      let resolvedViaPlane = false;
+
+      // Primary method: intersect current pointer ray with the exact 3D sticker plane
+      const mouseNow = getNormalizedMouse(e.clientX, e.clientY);
+      raycaster.setFromCamera(mouseNow, camera);
+      if (Math.abs(raycaster.ray.direction.dot(normal)) > 0.18) {
+        const stickerPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+          normal,
+          anchorPoint
+        );
+        const planeHit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(stickerPlane, planeHit)) {
+          const delta3D = planeHit.sub(anchorPoint);
+          const comp0 = delta3D.dot(worldAxes[0].vec);
+          const comp1 = delta3D.dot(worldAxes[1].vec);
+          if (Math.hypot(comp0, comp1) > 0.02) {
+            if (Math.abs(comp0) >= Math.abs(comp1)) {
+              bestAxis = worldAxes[0];
+              bestSign = comp0 >= 0 ? 1 : -1;
+            } else {
+              bestAxis = worldAxes[1];
+              bestSign = comp1 >= 0 ? 1 : -1;
+            }
+            resolvedViaPlane = true;
+          }
+        }
+      }
+
+      // Fallback for extreme grazing angles: differential screen projection at anchorPoint
+      if (!resolvedViaPlane) {
+        const projectDelta = (dirVec: THREE.Vector3) => {
+          const p0 = anchorPoint.clone().project(camera);
+          const p1 = anchorPoint
+            .clone()
+            .add(dirVec.clone().multiplyScalar(0.25))
+            .project(camera);
+          return new THREE.Vector2(
+            (p1.x - p0.x) * domElement.clientWidth * 0.5,
+            -(p1.y - p0.y) * domElement.clientHeight * 0.5
+          ).normalize();
+        };
+
+        const dragVec = new THREE.Vector2(dx, dy).normalize();
+        let bestScore = -1;
+
+        for (const candidate of worldAxes) {
+          const screenDir = projectDelta(candidate.vec);
+          const dot = dragVec.dot(screenDir);
+          if (Math.abs(dot) > bestScore) {
+            bestScore = Math.abs(dot);
+            bestAxis = candidate;
+            bestSign = dot >= 0 ? 1 : -1;
+          }
+        }
+      }
+
+      // Tangential motion vector T = bestSign * bestAxis.vec
+      // Rotation torque vector = normal x T
+      const tangentVec = bestAxis.vec.clone().multiplyScalar(bestSign);
+      const torqueVec = new THREE.Vector3().crossVectors(normal, tangentVec);
+
+      let rotAxis: 'x' | 'y' | 'z' = 'x';
+      let quarterTurnSign = 1;
+      if (Math.abs(torqueVec.x) > 0.5) {
+        rotAxis = 'x';
+        quarterTurnSign = torqueVec.x > 0 ? 1 : -1;
+      } else if (Math.abs(torqueVec.y) > 0.5) {
+        rotAxis = 'y';
+        quarterTurnSign = torqueVec.y > 0 ? 1 : -1;
+      } else {
+        rotAxis = 'z';
+        quarterTurnSign = torqueVec.z > 0 ? 1 : -1;
+      }
+
+      const layerVal =
+        rotAxis === 'x' ? cubiePos[0] : rotAxis === 'y' ? cubiePos[1] : cubiePos[2];
+
+      // Map (rotAxis, layerVal, quarterTurnSign) to standard move token
+      let moveToken: string | null = null;
+      if (rotAxis === 'x') {
+        if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'R' : "R'";
+        else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'L' : "L'";
+        else moveToken = quarterTurnSign === 1 ? 'M' : "M'";
+      } else if (rotAxis === 'y') {
+        if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'U' : "U'";
+        else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'D' : "D'";
+        else moveToken = quarterTurnSign === 1 ? 'E' : "E'";
+      } else {
+        if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'F' : "F'";
+        else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'B' : "B'";
+        else moveToken = quarterTurnSign === -1 ? 'S' : "S'";
+      }
+
+      if (moveToken) {
+        onUserMove(moveToken);
+      }
+    }
+  };
+
+  const handlePointerUp = (e: PointerEvent) => {
+    if (!pointerState || getEventPointerId(e) !== pointerState.pointerId) return;
+    const activePointerId = pointerState.pointerId;
+    pointerState = null;
+    if (e.type !== 'lostpointercapture') {
+      releaseCapturedPointer(activePointerId);
+    }
+  };
+
+  return {
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    getActivePointerId: () => pointerState?.pointerId ?? null,
+  };
+}
+
 const CAMERA_PRESETS: { label: string; theta: number; phi: number }[] = [
   { label: '标准教学视角 (U-F-R)', theta: Math.PI / 4.2, phi: Math.PI / 3.1 },
   { label: '左前视角 (U-F-L)', theta: -Math.PI / 4.2, phi: Math.PI / 3.1 },
@@ -465,249 +770,19 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
 
     // Pointer interaction: Raycast cubie sticker drag vs Orbit camera drag
-    const raycaster = new THREE.Raycaster();
-    let pointerState: {
-      pointerId: number;
-      mode: 'orbit' | 'sticker';
-      startX: number;
-      startY: number;
-      lastX: number;
-      lastY: number;
-      cubiePos?: [number, number, number];
-      faceDir?: FaceDir;
-      hitPoint?: THREE.Vector3;
-      moveTriggered?: boolean;
-    } | null = null;
-
-    const getNormalizedMouse = (clientX: number, clientY: number) => {
-      const rect = renderer.domElement.getBoundingClientRect();
-      return new THREE.Vector2(
-        ((clientX - rect.left) / rect.width) * 2 - 1,
-        -((clientY - rect.top) / rect.height) * 2 + 1
-      );
-    };
-
-    const capturePointer = (pointerId: number) => {
-      try {
-        renderer.domElement.setPointerCapture(pointerId);
-      } catch {
-        // ignore synthetic events where pointerId is not active
-      }
-    };
-
-    const handlePointerDown = (e: PointerEvent) => {
-      capturePointer(e.pointerId);
-      if (e.button !== 0) {
-        pointerState = {
-          pointerId: e.pointerId,
-          mode: 'orbit',
-          startX: e.clientX,
-          startY: e.clientY,
-          lastX: e.clientX,
-          lastY: e.clientY,
-        };
-        return;
-      }
-
-      const mouse = getNormalizedMouse(e.clientX, e.clientY);
-      raycaster.setFromCamera(mouse, camera);
-
-      const allMeshes: THREE.Object3D[] = [];
-      rootGroup.traverse((obj) => {
-        if ((obj as THREE.Mesh).isMesh && obj.userData?.faceDir) {
-          allMeshes.push(obj);
-        }
-      });
-
-      const hits = raycaster.intersectObjects(allMeshes, false);
-      if (hits.length > 0 && !activeAnimRef.current) {
-        const hitObj = hits[0].object;
-        const faceDir = hitObj.userData.faceDir as FaceDir;
-        const parentGroup = hitObj.parent;
-        const cubiePos = parentGroup?.userData?.pos as [number, number, number] | undefined;
-        if (faceDir && cubiePos) {
-          pointerState = {
-            pointerId: e.pointerId,
-            mode: 'sticker',
-            startX: e.clientX,
-            startY: e.clientY,
-            lastX: e.clientX,
-            lastY: e.clientY,
-            cubiePos,
-            faceDir,
-            hitPoint: hits[0].point.clone(),
-            moveTriggered: false,
-          };
-          return;
-        }
-      }
-
-      pointerState = {
-        pointerId: e.pointerId,
-        mode: 'orbit',
-        startX: e.clientX,
-        startY: e.clientY,
-        lastX: e.clientX,
-        lastY: e.clientY,
-      };
-    };
-
-    const handlePointerMove = (e: PointerEvent) => {
-      if (!pointerState) return;
-      if (e.pointerType === 'mouse' && e.buttons === 0) {
-        pointerState = null;
-        return;
-      }
-
-      if (pointerState.mode === 'orbit') {
-        const dx = e.clientX - pointerState.lastX;
-        const dy = e.clientY - pointerState.lastY;
-        pointerState.lastX = e.clientX;
-        pointerState.lastY = e.clientY;
-
-        const sph = cameraSphericalRef.current;
-        sph.targetTheta -= dx * 0.0075;
-        sph.targetPhi = Math.max(0.22, Math.min(Math.PI - 0.22, sph.targetPhi - dy * 0.0075));
+    const { handlePointerDown, handlePointerMove, handlePointerUp } = createStagePointerHandlers({
+      domElement: renderer.domElement,
+      camera,
+      rootGroup,
+      cameraSpherical: cameraSphericalRef.current,
+      isAnimating: () => Boolean(activeAnimRef.current),
+      onRequestRender: () => {
         needsRenderRef.current = true;
-        return;
-      }
-
-      if (pointerState.mode === 'sticker' && !pointerState.moveTriggered) {
-        const dx = e.clientX - pointerState.startX;
-        const dy = e.clientY - pointerState.startY;
-        const dist = Math.hypot(dx, dy);
-        if (dist < 16) return;
-
-        pointerState.moveTriggered = true;
-        const { cubiePos, faceDir, hitPoint } = pointerState;
-        if (!cubiePos || !faceDir) return;
-
-        const normal = FACE_NORMALS[faceDir];
-        // Candidate world tangent axes perpendicular to face normal
-        const allWorldAxes: { vec: THREE.Vector3; name: 'x' | 'y' | 'z' }[] = [
-          { vec: new THREE.Vector3(1, 0, 0), name: 'x' },
-          { vec: new THREE.Vector3(0, 1, 0), name: 'y' },
-          { vec: new THREE.Vector3(0, 0, 1), name: 'z' },
-        ];
-        const worldAxes = allWorldAxes.filter((a) => Math.abs(a.vec.dot(normal)) < 0.1);
-
-        const anchorPoint =
-          hitPoint ??
-          new THREE.Vector3(...cubiePos).add(normal.clone().multiplyScalar(0.472));
-
-        let bestAxis = worldAxes[0];
-        let bestSign = 1;
-        let resolvedViaPlane = false;
-
-        // Primary method: intersect current pointer ray with the exact 3D sticker plane
-        const mouseNow = getNormalizedMouse(e.clientX, e.clientY);
-        raycaster.setFromCamera(mouseNow, camera);
-        if (Math.abs(raycaster.ray.direction.dot(normal)) > 0.18) {
-          const stickerPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
-            normal,
-            anchorPoint
-          );
-          const planeHit = new THREE.Vector3();
-          if (raycaster.ray.intersectPlane(stickerPlane, planeHit)) {
-            const delta3D = planeHit.sub(anchorPoint);
-            const comp0 = delta3D.dot(worldAxes[0].vec);
-            const comp1 = delta3D.dot(worldAxes[1].vec);
-            if (Math.hypot(comp0, comp1) > 0.02) {
-              if (Math.abs(comp0) >= Math.abs(comp1)) {
-                bestAxis = worldAxes[0];
-                bestSign = comp0 >= 0 ? 1 : -1;
-              } else {
-                bestAxis = worldAxes[1];
-                bestSign = comp1 >= 0 ? 1 : -1;
-              }
-              resolvedViaPlane = true;
-            }
-          }
-        }
-
-        // Fallback for extreme grazing angles: differential screen projection at anchorPoint
-        if (!resolvedViaPlane) {
-          const projectDelta = (dirVec: THREE.Vector3) => {
-            const p0 = anchorPoint.clone().project(camera);
-            const p1 = anchorPoint
-              .clone()
-              .add(dirVec.clone().multiplyScalar(0.25))
-              .project(camera);
-            return new THREE.Vector2(
-              (p1.x - p0.x) * renderer.domElement.clientWidth * 0.5,
-              -(p1.y - p0.y) * renderer.domElement.clientHeight * 0.5
-            ).normalize();
-          };
-
-          const dragVec = new THREE.Vector2(dx, dy).normalize();
-          let bestScore = -1;
-
-          for (const candidate of worldAxes) {
-            const screenDir = projectDelta(candidate.vec);
-            const dot = dragVec.dot(screenDir);
-            if (Math.abs(dot) > bestScore) {
-              bestScore = Math.abs(dot);
-              bestAxis = candidate;
-              bestSign = dot >= 0 ? 1 : -1;
-            }
-          }
-        }
-
-        // Tangential motion vector T = bestSign * bestAxis.vec
-        // Rotation torque vector = normal x T
-        const tangentVec = bestAxis.vec.clone().multiplyScalar(bestSign);
-        const torqueVec = new THREE.Vector3().crossVectors(normal, tangentVec);
-
-        let rotAxis: 'x' | 'y' | 'z' = 'x';
-        let quarterTurnSign = 1;
-        if (Math.abs(torqueVec.x) > 0.5) {
-          rotAxis = 'x';
-          quarterTurnSign = torqueVec.x > 0 ? 1 : -1;
-        } else if (Math.abs(torqueVec.y) > 0.5) {
-          rotAxis = 'y';
-          quarterTurnSign = torqueVec.y > 0 ? 1 : -1;
-        } else {
-          rotAxis = 'z';
-          quarterTurnSign = torqueVec.z > 0 ? 1 : -1;
-        }
-
-        const layerVal =
-          rotAxis === 'x' ? cubiePos[0] : rotAxis === 'y' ? cubiePos[1] : cubiePos[2];
-
-        // Map (rotAxis, layerVal, quarterTurnSign) to standard move token
-        let moveToken: string | null = null;
-        if (rotAxis === 'x') {
-          if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'R' : "R'";
-          else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'L' : "L'";
-          else moveToken = quarterTurnSign === 1 ? 'M' : "M'";
-        } else if (rotAxis === 'y') {
-          if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'U' : "U'";
-          else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'D' : "D'";
-          else moveToken = quarterTurnSign === 1 ? 'E' : "E'";
-        } else {
-          if (layerVal === 1) moveToken = quarterTurnSign === -1 ? 'F' : "F'";
-          else if (layerVal === -1) moveToken = quarterTurnSign === 1 ? 'B' : "B'";
-          else moveToken = quarterTurnSign === -1 ? 'S' : "S'";
-        }
-
-        if (moveToken) {
-          onUserMoveRef.current(moveToken);
-        }
-      }
-    };
-
-    const handlePointerUp = () => {
-      if (pointerState) {
-        try {
-          if (renderer.domElement.hasPointerCapture(pointerState.pointerId)) {
-            renderer.domElement.releasePointerCapture(pointerState.pointerId);
-          }
-        } catch {
-          // ignore
-        }
-      }
-      pointerState = null;
-    };
+      },
+      onUserMove: (moveToken) => {
+        onUserMoveRef.current(moveToken);
+      },
+    });
 
     const handleContextMenu = (e: MouseEvent) => {
       e.preventDefault();
@@ -742,6 +817,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     domElem.addEventListener('lostpointercapture', handlePointerUp);
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
     domElem.addEventListener('wheel', handleWheel, { passive: false });
 
     const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -854,6 +930,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       domElem.removeEventListener('lostpointercapture', handlePointerUp);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
       domElem.removeEventListener('wheel', handleWheel);
       clearArrowGroup(arrowGroup);
       gridHelper.geometry.dispose();

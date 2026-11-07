@@ -38,9 +38,11 @@ import { narrationEngine } from './utils/narrationEngine';
 import {
   SolvePenalty,
   SolveRecord,
+  SolveStats,
   loadCompletedLessons,
   loadSettings,
   loadSolveRecords,
+  loadSolveStats,
   saveCompletedLessons,
   saveSettings,
   saveSolveRecords,
@@ -64,12 +66,16 @@ export const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isNarratedWalkthrough, setIsNarratedWalkthrough] = useState(false);
   const walkthroughSessionRef = useRef(0);
+  const solveSeqRef = useRef(0);
 
   const [completedLessons, setCompletedLessons] = useState<string[]>(() =>
     loadCompletedLessons()
   );
   const [solveRecords, setSolveRecords] = useState<SolveRecord[]>(() =>
     loadSolveRecords()
+  );
+  const [solveStats, setSolveStats] = useState<SolveStats>(() =>
+    loadSolveStats()
   );
 
   // Workspace & Lesson state
@@ -770,7 +776,7 @@ export const App: React.FC = () => {
               setTimerStartedAt(0);
               setTimerElapsedMs(finalTimeMs);
               const newRecord: SolveRecord = {
-                id: `solve_${Date.now()}`,
+                id: `solve_${Date.now()}_${++solveSeqRef.current}`,
                 timeMs: finalTimeMs,
                 scramble: scrambleTokens.join(' '),
                 createdAt: new Date().toLocaleTimeString('zh-CN', {
@@ -782,8 +788,9 @@ export const App: React.FC = () => {
               };
               setSolveRecords((prev) => {
                 const updated = [newRecord, ...prev];
-                saveSolveRecords(updated);
-                return updated;
+                const persisted = saveSolveRecords(updated);
+                setSolveStats(loadSolveStats());
+                return persisted;
               });
               triggerVictoryCelebration();
               narrationEngine.speak(
@@ -1042,8 +1049,9 @@ export const App: React.FC = () => {
   }, []);
 
   const handleClearSolveRecords = useCallback(() => {
-    setSolveRecords([]);
-    saveSolveRecords([]);
+    const persisted = saveSolveRecords([]);
+    setSolveRecords(persisted);
+    setSolveStats(loadSolveStats());
   }, []);
 
   // Global Keyboard Shortcuts (R, L, U, D, F, B, M, Space)
@@ -1157,8 +1165,9 @@ export const App: React.FC = () => {
   const handleUpdateSolvePenalty = useCallback((id: string, penalty: SolvePenalty) => {
     setSolveRecords((prev) => {
       const next = prev.map((r) => (r.id === id ? { ...r, penalty } : r));
-      saveSolveRecords(next);
-      return next;
+      const persisted = saveSolveRecords(next);
+      setSolveStats(loadSolveStats());
+      return persisted;
     });
   }, []);
 
@@ -1349,6 +1358,7 @@ export const App: React.FC = () => {
             timerElapsedMs={timerElapsedMs}
             sandboxMoveHistory={sandboxMoveHistory}
             solveRecords={solveRecords}
+            solveStats={solveStats}
             onGenerateNewScramble={handleGenerateNewScramble}
             onResetSandboxCube={handleResetSandboxCube}
             onToggleTimer={handleToggleTimer}
