@@ -55,8 +55,8 @@
 
 ### 环境要求
 
-- **Node.js** `>= 18`（推荐 `20+`）
-- **npm** `>= 9`
+- **Node.js** `^22.12.0 || ^24.0.0 || >=26.0.0`（推荐 `24 LTS`）
+- **npm** `>= 10`
 
 ### 安装与运行
 
@@ -119,7 +119,7 @@ rubiks-cube-academy/
 - **前端框架**：React 18 + TypeScript 5.6
 - **三维渲染**：Three.js (`0.170`)
 - **样式方案**：Tailwind CSS v4 (`@tailwindcss/vite`) + Lucide Icons
-- **构建与测试**：Vite 6 + Vitest 2
+- **构建与测试**：Vite 6 + Vitest 5
 
 ## 🤝 参与贡献
 

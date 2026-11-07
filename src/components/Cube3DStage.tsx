@@ -462,6 +462,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     };
 
     syncCubieMeshes(cubeRef.current, getActiveLayerFilterFromToken(hintMoveTokenRef.current));
+    rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
 
     // Pointer interaction: Raycast cubie sticker drag vs Orbit camera drag
     const raycaster = new THREE.Raycaster();
@@ -785,7 +786,12 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       const isAnimating = Boolean(anim);
       if (anim) {
         const elapsed = Math.max(0, now - anim.startTime);
-        const rawT = Math.min(1, elapsed / Math.max(40, anim.durationMs));
+        const effectiveDuration =
+          reducedMotionQuery?.matches || anim.durationMs <= 0
+            ? 0
+            : Math.max(40, anim.durationMs);
+        const rawT =
+          effectiveDuration === 0 ? 1 : Math.min(1, elapsed / effectiveDuration);
         // Cubic ease out
         const easedT = 1 - Math.pow(1 - rawT, 3);
         const def = getMoveDefinition(anim.moveToken);
@@ -872,6 +878,29 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
   // Trigger layer animation when activeAnimation prop changes
   useEffect(() => {
     if (activeAnimation) {
+      const isReducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (isReducedMotion || activeAnimation.durationMs <= 0) {
+        activeAnimRef.current = null;
+        const postMoveCube = applyMove(activeAnimation.fromCube, activeAnimation.moveToken);
+        syncCubieMeshes(
+          postMoveCube,
+          getActiveLayerFilterFromToken(hintMoveTokenRef.current),
+          false
+        );
+        if (sceneObjectsRef.current) {
+          const { renderer, scene, camera } = sceneObjectsRef.current;
+          needsRenderRef.current = false;
+          renderer.render(scene, camera);
+        }
+        const immediateTimer = window.setTimeout(() => {
+          activeAnimation.onFinish();
+        }, 0);
+        return () => window.clearTimeout(immediateTimer);
+      }
+
       const startTime = performance.now();
       let def: ReturnType<typeof getMoveDefinition> | null = null;
       try {
@@ -923,13 +952,13 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     if (!activeAnimRef.current) {
       syncCubieMeshes(cube, getActiveLayerFilterFromToken(hintMoveToken));
     }
-  }, [cube, focusMode, isCubieFocused, hintMoveToken]);
+  }, [cube, focusMode, isCubieFocused, hintMoveToken, sceneKey]);
 
-  // Rebuild 3D directional arrow when hintMoveToken or show3DArrows changes
+  // Rebuild 3D directional arrow when hintMoveToken, show3DArrows, or sceneKey changes
   useEffect(() => {
     const tokenForArrow = activeAnimation?.moveToken ?? hintMoveToken;
     rebuild3DArrow(tokenForArrow);
-  }, [hintMoveToken, activeAnimation, show3DArrows]);
+  }, [hintMoveToken, activeAnimation, show3DArrows, sceneKey]);
 
   const applyCameraPreset = (idx: number) => {
     const preset = CAMERA_PRESETS[idx];

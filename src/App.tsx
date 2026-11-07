@@ -119,6 +119,7 @@ export const App: React.FC = () => {
   const [isFullPractice, setIsFullPractice] = useState(false);
   const [sandboxMoveHistory, setSandboxMoveHistory] = useState<string[]>([]);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [timerStartedAt, setTimerStartedAt] = useState(0);
   const [timerElapsedMs, setTimerElapsedMs] = useState(0);
   const [timerArmedAfterScramble, setTimerArmedAfterScramble] = useState(false);
   const timerStartRef = useRef<number>(0);
@@ -337,8 +338,14 @@ export const App: React.FC = () => {
       const def = getMoveDefinition(moveToken);
       const isDouble = Math.abs(def.quarterTurns) === 2;
       soundEngine.playMoveSound(isDouble);
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const baseDur = isDouble ? 260 : 180;
-      const durationMs = customDurationMs ?? Math.round(baseDur / playbackSpeed);
+      const durationMs = prefersReducedMotion
+        ? 0
+        : customDurationMs ?? Math.round(baseDur / playbackSpeed);
       const nextId = animIdCounterRef.current++;
 
       isAnimatingRef.current = true;
@@ -696,15 +703,6 @@ export const App: React.FC = () => {
     if (scrambleTokens.length > 0) stageRef.current?.focus({ preventScroll: true });
   }, [scrambleTokens]);
 
-  // Sandbox Timer Interval
-  useEffect(() => {
-    if (!timerRunning) return;
-    const interval = window.setInterval(() => {
-      setTimerElapsedMs(performance.now() - timerStartRef.current);
-    }, 31);
-    return () => window.clearInterval(interval);
-  }, [timerRunning]);
-
   // Sandbox Auto-Solve Queue Effect
   useEffect(() => {
     if (workspaceMode !== 'sandbox' || autoSolveQueue.length === 0 || activeAnimation) {
@@ -747,6 +745,8 @@ export const App: React.FC = () => {
       if (startedNow) {
         timerStartRef.current = movedAt;
         timedMovesRef.current = 0;
+        setTimerStartedAt(movedAt);
+        setTimerElapsedMs(0);
         setTimerRunning(true);
         setTimerArmedAfterScramble(false);
       }
@@ -767,6 +767,7 @@ export const App: React.FC = () => {
             if (isTimedMove) {
               const finalTimeMs = Math.max(1, Math.round(movedAt - timerStartRef.current));
               setTimerRunning(false);
+              setTimerStartedAt(0);
               setTimerElapsedMs(finalTimeMs);
               const newRecord: SolveRecord = {
                 id: `solve_${Date.now()}`,
@@ -906,6 +907,7 @@ export const App: React.FC = () => {
     setIsFullPractice(fullPractice);
     setAutoSolveQueue([]);
     setTimerRunning(false);
+    setTimerStartedAt(0);
     setTimerElapsedMs(0);
     let newScramble: string[];
     let scrambled: Cubie[];
@@ -923,13 +925,20 @@ export const App: React.FC = () => {
       : '已随机打乱。拨动魔方或按空格键即可开始计时。');
   }, [cancelAllAnimationsAndQueues]);
 
-  const handleGenerateNewScramble = () => startScrambledCube(false);
-  const handleStartFullPractice = () => startScrambledCube(true);
+  const handleGenerateNewScramble = useCallback(
+    () => startScrambledCube(false),
+    [startScrambledCube]
+  );
+  const handleStartFullPractice = useCallback(
+    () => startScrambledCube(true),
+    [startScrambledCube]
+  );
 
   const handleResetSandboxCube = useCallback(() => {
     cancelAllAnimationsAndQueues();
     setAutoSolveQueue([]);
     setTimerRunning(false);
+    setTimerStartedAt(0);
     setTimerElapsedMs(0);
     setTimerArmedAfterScramble(false);
     setSandboxCube(createSolvedCube());
@@ -944,11 +953,14 @@ export const App: React.FC = () => {
     if (isAnimatingRef.current || autoSolveQueue.length > 0) return;
     if (timerRunning) {
       setTimerRunning(false);
+      setTimerStartedAt(0);
       setTimerElapsedMs(0);
       narrationEngine.speak('已取消本轮计时。');
     } else if (timerArmedAfterScramble) {
-      timerStartRef.current = performance.now();
+      const now = performance.now();
+      timerStartRef.current = now;
       timedMovesRef.current = 0;
+      setTimerStartedAt(now);
       setTimerElapsedMs(0);
       setTimerRunning(true);
       setTimerArmedAfterScramble(false);
@@ -966,6 +978,7 @@ export const App: React.FC = () => {
     }
     setPendingUserMoves([]);
     setTimerRunning(false);
+    setTimerStartedAt(0);
     setTimerArmedAfterScramble(false);
     let simplified: string[] = [];
     for (const tok of sandboxMoveHistory) {
@@ -990,6 +1003,48 @@ export const App: React.FC = () => {
       return next;
     });
   }, [activeCommentary.speechText]);
+
+  const handleToggleFocusMode = useCallback(() => setFocusMode((v) => !v), []);
+  const handleToggle3DArrows = useCallback(() => setShow3DArrows((v) => !v), []);
+  const handleToggle2DNet = useCallback(() => setShow2DNet((v) => !v), []);
+  const handleToggleSound = useCallback(() => setSoundEnabled((v) => !v), []);
+  const handleOpenGuideModal = useCallback(() => setIsGuideOpen(true), []);
+  const handleCloseGuideModal = useCallback(() => setIsGuideOpen(false), []);
+
+  const handleSpeakCurrentCommentary = useCallback(() => {
+    walkthroughSessionRef.current++;
+    setIsNarratedWalkthrough(false);
+    narrationEngine.speak(activeCommentary.speechText, { force: true });
+  }, [activeCommentary.speechText]);
+
+  const handleChangeYellowCrossCase = useCallback(
+    (example: YellowCrossCase) => handleSelectLesson(selectedLesson, example),
+    [handleSelectLesson, selectedLesson]
+  );
+
+  const handleMarkCurrentLessonComplete = useCallback(() => {
+    walkthroughSessionRef.current++;
+    setIsNarratedWalkthrough(false);
+    markLessonCompleted(activeLesson.id);
+    triggerVictoryCelebration();
+    narrationEngine.speak(`已标记本课学会！${activeLesson.completionCommentary}`);
+  }, [
+    activeLesson.id,
+    activeLesson.completionCommentary,
+    markLessonCompleted,
+    triggerVictoryCelebration,
+  ]);
+
+  const handleSpeakCustomText = useCallback((txt: string) => {
+    walkthroughSessionRef.current++;
+    setIsNarratedWalkthrough(false);
+    narrationEngine.speak(txt, { force: true });
+  }, []);
+
+  const handleClearSolveRecords = useCallback(() => {
+    setSolveRecords([]);
+    saveSolveRecords([]);
+  }, []);
 
   // Global Keyboard Shortcuts (R, L, U, D, F, B, M, Space)
   useEffect(() => {
@@ -1108,13 +1163,16 @@ export const App: React.FC = () => {
   }, []);
 
   const netCube = activeAnimation ? activeAnimation.fromCube : displayedCube;
-  const cubeNet = (
-    <Cube2DNet
-      cube={netCube}
-      focusMode={effectiveFocusMode}
-      isCubieFocused={activeLesson.isCubieFocused}
-      onFaceClick={handleUserMove}
-    />
+  const cubeNet = useMemo(
+    () => (
+      <Cube2DNet
+        cube={netCube}
+        focusMode={effectiveFocusMode}
+        isCubieFocused={activeLesson.isCubieFocused}
+        onFaceClick={handleUserMove}
+      />
+    ),
+    [netCube, effectiveFocusMode, activeLesson.isCubieFocused, handleUserMove]
   );
 
   return (
@@ -1124,16 +1182,16 @@ export const App: React.FC = () => {
         workspaceMode={workspaceMode}
         onSwitchWorkspaceMode={handleSwitchWorkspaceMode}
         focusMode={focusMode}
-        onToggleFocusMode={() => setFocusMode((v) => !v)}
+        onToggleFocusMode={handleToggleFocusMode}
         show3DArrows={show3DArrows}
-        onToggle3DArrows={() => setShow3DArrows((v) => !v)}
+        onToggle3DArrows={handleToggle3DArrows}
         show2DNet={show2DNet}
-        onToggle2DNet={() => setShow2DNet((v) => !v)}
+        onToggle2DNet={handleToggle2DNet}
         narrationEnabled={narrationEnabled}
         onToggleNarration={handleToggleNarration}
         soundEnabled={soundEnabled}
-        onToggleSound={() => setSoundEnabled((v) => !v)}
-        onOpenGuideModal={() => setIsGuideOpen(true)}
+        onToggleSound={handleToggleSound}
+        onOpenGuideModal={handleOpenGuideModal}
       />
 
       {/* Compact Mobile/Tablet Pane Switcher (<1024px) */}
@@ -1224,11 +1282,7 @@ export const App: React.FC = () => {
             isSpeaking={isSpeaking}
             isNarratedWalkthrough={isNarratedWalkthrough}
             showWalkthroughButton={workspaceMode === 'course'}
-            onSpeakCurrent={() => {
-              walkthroughSessionRef.current++;
-              setIsNarratedWalkthrough(false);
-              narrationEngine.speak(activeCommentary.speechText, { force: true });
-            }}
+            onSpeakCurrent={handleSpeakCurrentCommentary}
             onStopSpeaking={stopNarratedWalkthrough}
             onToggleNarratedWalkthrough={handleToggleNarratedWalkthrough}
             onToggleNarrationEnabled={handleToggleNarration}
@@ -1268,7 +1322,7 @@ export const App: React.FC = () => {
             lessonTab={lessonTab}
             onChangeLessonTab={handleChangeLessonTab}
             yellowCrossCase={yellowCrossCase}
-            onChangeYellowCrossCase={(example) => handleSelectLesson(selectedLesson, example)}
+            onChangeYellowCrossCase={handleChangeYellowCrossCase}
             fullPracticeProgress={fullPracticeProgress}
             onStartFullPractice={handleStartFullPractice}
             canStartTimer={timerArmedAfterScramble}
@@ -1282,25 +1336,16 @@ export const App: React.FC = () => {
             practiceJustSucceeded={practiceJustSucceeded}
             onUndoPracticeError={handleUndoPracticeError}
             onResetPractice={handleResetPractice}
-            onMarkLessonComplete={() => {
-              walkthroughSessionRef.current++;
-              setIsNarratedWalkthrough(false);
-              markLessonCompleted(activeLesson.id);
-              triggerVictoryCelebration();
-              narrationEngine.speak(`已标记本课学会！${activeLesson.completionCommentary}`);
-            }}
+            onMarkLessonComplete={handleMarkCurrentLessonComplete}
             onSelectLesson={handleSelectLesson}
             onJumpToDemoStep={handleJumpToStep}
             isSpeaking={isSpeaking}
-            onSpeakText={(txt) => {
-              walkthroughSessionRef.current++;
-              setIsNarratedWalkthrough(false);
-              narrationEngine.speak(txt, { force: true });
-            }}
+            onSpeakText={handleSpeakCustomText}
             onStopSpeaking={stopNarratedWalkthrough}
             scrambleTokens={scrambleTokens}
             isCubeCurrentlySolved={isSandboxSolved}
             timerRunning={timerRunning}
+            timerStartedAt={timerStartedAt}
             timerElapsedMs={timerElapsedMs}
             sandboxMoveHistory={sandboxMoveHistory}
             solveRecords={solveRecords}
@@ -1308,10 +1353,7 @@ export const App: React.FC = () => {
             onResetSandboxCube={handleResetSandboxCube}
             onToggleTimer={handleToggleTimer}
             onAutoSolveSandbox={handleAutoSolveSandbox}
-            onClearSolveRecords={() => {
-              setSolveRecords([]);
-              saveSolveRecords([]);
-            }}
+            onClearSolveRecords={handleClearSolveRecords}
             onUpdateSolvePenalty={handleUpdateSolvePenalty}
             isAnimating={Boolean(activeAnimation)}
             isAutoSolving={autoSolveQueue.length > 0}
@@ -1322,7 +1364,7 @@ export const App: React.FC = () => {
       {/* WCA Notation & Control Guide Modal */}
       <NotationGuideModal
         isOpen={isGuideOpen}
-        onClose={() => setIsGuideOpen(false)}
+        onClose={handleCloseGuideModal}
       />
     </div>
   );

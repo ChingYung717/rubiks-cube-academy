@@ -54,6 +54,7 @@ interface RightWorkbenchPanelProps {
   scrambleTokens: string[];
   isCubeCurrentlySolved: boolean;
   timerRunning: boolean;
+  timerStartedAt?: number;
   timerElapsedMs: number;
   sandboxMoveHistory: string[];
   solveRecords: SolveRecord[];
@@ -67,7 +68,86 @@ interface RightWorkbenchPanelProps {
   isAutoSolving?: boolean;
 }
 
-export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
+interface SandboxTimerBoxProps {
+  timerRunning: boolean;
+  timerStartedAt: number;
+  timerElapsedMs: number;
+  canStartTimer: boolean;
+  isCubeCurrentlySolved: boolean;
+  isAnimating: boolean;
+  onToggleTimer: () => void;
+}
+
+const SandboxTimerBoxComponent: React.FC<SandboxTimerBoxProps> = ({
+  timerRunning,
+  timerStartedAt,
+  timerElapsedMs,
+  canStartTimer,
+  isCubeCurrentlySolved,
+  isAnimating,
+  onToggleTimer,
+}) => {
+  const [liveElapsedMs, setLiveElapsedMs] = useState(timerElapsedMs);
+
+  useEffect(() => {
+    if (!timerRunning) {
+      setLiveElapsedMs(timerElapsedMs);
+      return;
+    }
+    const origin = timerStartedAt > 0 ? timerStartedAt : performance.now();
+    setLiveElapsedMs(Math.max(0, performance.now() - origin));
+    const interval = window.setInterval(() => {
+      setLiveElapsedMs(Math.max(0, performance.now() - origin));
+    }, 31);
+    return () => window.clearInterval(interval);
+  }, [timerRunning, timerStartedAt, timerElapsedMs]);
+
+  const displayedMs = timerRunning ? liveElapsedMs : timerElapsedMs;
+
+  return (
+    <div className="p-4 rounded-2xl bg-slate-950/90 border border-slate-800 flex flex-col items-center text-center shadow-inner">
+      <div className="text-[11px] text-slate-400 mb-1">
+        {timerRunning
+          ? '⏱️ 正在速拧计时中（还原六面将自动停表）'
+          : canStartTimer
+            ? '可按空格键、点击开始，或直接拨动魔方'
+            : '生成新的计时打乱后可开始计时'}
+      </div>
+      <div
+        data-testid="sandbox-timer-display"
+        className={`font-mono text-4xl font-extrabold tracking-tight my-1.5 transition-colors ${
+          timerRunning
+            ? 'text-cyan-300'
+            : displayedMs > 0 && isCubeCurrentlySolved
+              ? 'text-emerald-400'
+              : 'text-slate-100'
+        }`}
+      >
+        {formatTimeMs(displayedMs)}
+      </div>
+
+      <div className="flex items-center gap-2 w-full mt-2">
+        <button
+          onClick={onToggleTimer}
+          disabled={isAnimating || (!timerRunning && !canStartTimer)}
+          data-testid="btn-sandbox-timer-toggle"
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-45 ${
+            timerRunning
+              ? 'bg-rose-500 hover:bg-rose-400 text-slate-950 shadow-lg shadow-rose-500/20'
+              : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20'
+          }`}
+        >
+          <Timer className="w-4 h-4" />
+          <span>{timerRunning ? '取消本轮 (Space)' : '开始速拧计时 (Space)'}</span>
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const SandboxTimerBox = React.memo(SandboxTimerBoxComponent);
+
+const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
   workspaceMode,
   lesson,
   lessonTab,
@@ -96,6 +176,7 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
   scrambleTokens,
   isCubeCurrentlySolved,
   timerRunning,
+  timerStartedAt = 0,
   timerElapsedMs,
   sandboxMoveHistory,
   solveRecords,
@@ -145,8 +226,13 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
   useEffect(() => {
     const container = stepListContainerRef.current;
     if (!container || workspaceMode !== 'course') return;
+    const isReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const scrollBehavior: ScrollBehavior = isReducedMotion ? 'auto' : 'smooth';
     if (lessonTab === 'demo' && demoStep === 0) {
-      container.scrollTo({ top: 0, behavior: 'smooth' });
+      container.scrollTo({ top: 0, behavior: scrollBehavior });
       return;
     }
     const item = activeStepItemRef.current;
@@ -154,11 +240,11 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
       const itemTop = item.offsetTop - container.offsetTop;
       const itemBottom = itemTop + item.offsetHeight;
       if (itemTop < container.scrollTop) {
-        container.scrollTo({ top: Math.max(0, itemTop - 6), behavior: 'smooth' });
+        container.scrollTo({ top: Math.max(0, itemTop - 6), behavior: scrollBehavior });
       } else if (itemBottom > container.scrollTop + container.clientHeight) {
         container.scrollTo({
           top: itemBottom - container.clientHeight + 6,
-          behavior: 'smooth',
+          behavior: scrollBehavior,
         });
       }
     }
@@ -213,44 +299,16 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
           )}
         </div>
 
-        {/* Digital Timer Box */}
-        <div className="p-4 rounded-2xl bg-slate-950/90 border border-slate-800 flex flex-col items-center text-center shadow-inner">
-          <div className="text-[11px] text-slate-400 mb-1">
-            {timerRunning
-              ? '⏱️ 正在速拧计时中（还原六面将自动停表）'
-              : canStartTimer
-                ? '可按空格键、点击开始，或直接拨动魔方'
-                : '生成新的计时打乱后可开始计时'}
-          </div>
-          <div
-            data-testid="sandbox-timer-display"
-            className={`font-mono text-4xl font-extrabold tracking-tight my-1.5 transition-colors ${
-              timerRunning
-                ? 'text-cyan-300'
-                : timerElapsedMs > 0 && isCubeCurrentlySolved
-                  ? 'text-emerald-400'
-                  : 'text-slate-100'
-            }`}
-          >
-            {formatTimeMs(timerElapsedMs)}
-          </div>
-
-          <div className="flex items-center gap-2 w-full mt-2">
-            <button
-              onClick={onToggleTimer}
-              disabled={isAnimating || (!timerRunning && !canStartTimer)}
-              data-testid="btn-sandbox-timer-toggle"
-              className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-45 ${
-                timerRunning
-                  ? 'bg-rose-500 hover:bg-rose-400 text-slate-950 shadow-lg shadow-rose-500/20'
-                  : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20'
-              }`}
-            >
-              <Timer className="w-4 h-4" />
-              <span>{timerRunning ? '取消本轮 (Space)' : '开始速拧计时 (Space)'}</span>
-            </button>
-          </div>
-        </div>
+        {/* Isolated Digital Timer Box */}
+        <SandboxTimerBox
+          timerRunning={timerRunning}
+          timerStartedAt={timerStartedAt}
+          timerElapsedMs={timerElapsedMs}
+          canStartTimer={canStartTimer}
+          isCubeCurrentlySolved={isCubeCurrentlySolved}
+          isAnimating={isAnimating}
+          onToggleTimer={onToggleTimer}
+        />
 
         {/* Scramble & Auto-Solve Actions */}
         <div className="p-3.5 rounded-xl bg-slate-900/75 border border-slate-800/90 space-y-2.5">
@@ -356,8 +414,13 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
             </div>
             <div className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 text-center">
               <div className="text-[10px] text-slate-400">Ao5 五次平均</div>
-              <div className="font-mono text-sm font-bold text-cyan-300 mt-0.5">
-                {ao5Ms !== null ? formatTimeMs(ao5Ms) : '--'}
+              <div
+                data-testid="sandbox-ao5-display"
+                className={`font-mono text-sm font-bold mt-0.5 ${
+                  ao5Ms === 'DNF' ? 'text-rose-400' : 'text-cyan-300'
+                }`}
+              >
+                {ao5Ms === null ? '--' : ao5Ms === 'DNF' ? 'DNF' : formatTimeMs(ao5Ms)}
               </div>
             </div>
             <div className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 text-center">
@@ -860,3 +923,5 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
     </aside>
   );
 };
+
+export const RightWorkbenchPanel = React.memo(RightWorkbenchPanelComponent);

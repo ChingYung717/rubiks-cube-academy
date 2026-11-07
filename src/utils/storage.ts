@@ -154,9 +154,9 @@ export function formatTimeMs(ms: number): string {
  * - Applies optional +2 (2000ms) or DNF penalties
  * - Truncates individual solve times to centiseconds (10ms)
  * - Drops the fastest and slowest, averages the middle 3, and rounds to nearest centisecond
- * - Returns null if fewer than 5 solves or if 2+ solves in the window are DNF
+ * - Returns null if fewer than 5 solves, or 'DNF' if 2+ solves in the window are DNF
  */
-export function computeAo5(records: SolveRecord[]): number | null {
+export function computeAo5(records: SolveRecord[]): number | 'DNF' | null {
   if (records.length < 5) return null;
   const recent5 = records.slice(0, 5).map((r) => {
     if (r.penalty === 'DNF' || !Number.isFinite(r.timeMs) || r.timeMs < 0) {
@@ -167,7 +167,7 @@ export function computeAo5(records: SolveRecord[]): number | null {
   });
   recent5.sort((a, b) => a - b);
   if (!Number.isFinite(recent5[3])) {
-    return null;
+    return 'DNF';
   }
   const middle3Mean = (recent5[1] + recent5[2] + recent5[3]) / 3;
   return Math.round(middle3Mean / 10) * 10;

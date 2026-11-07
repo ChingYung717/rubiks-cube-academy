@@ -592,7 +592,7 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     // Middle 3: 12000, 12000, 15000 -> avg = 13000
     expect(computeAo5(recordsWithPenalty)).toBe(13000);
 
-    // With 2 DNFs -> Ao5 is null (DNF)
+    // With 2 DNFs -> Ao5 is 'DNF' (distinct from null when < 5 solves)
     const recordsTwoDnf = [
       { id: '1', timeMs: 10000, penalty: 'DNF' as const, scramble: '', createdAt: '', moveCount: 20 },
       { id: '2', timeMs: 12000, penalty: 'DNF' as const, scramble: '', createdAt: '', moveCount: 20 },
@@ -600,7 +600,8 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       { id: '4', timeMs: 11000, scramble: '', createdAt: '', moveCount: 20 },
       { id: '5', timeMs: 15000, scramble: '', createdAt: '', moveCount: 20 },
     ];
-    expect(computeAo5(recordsTwoDnf)).toBeNull();
+    expect(computeAo5(recordsTwoDnf)).toBe('DNF');
+    expect(computeAo5(recordsTwoDnf.slice(0, 4))).toBeNull();
   });
 
   it('validates and sanitizes persisted localStorage settings and records safely', () => {
