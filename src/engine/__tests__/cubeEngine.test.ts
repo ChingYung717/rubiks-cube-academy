@@ -1,0 +1,467 @@
+import { describe, expect, it } from 'vitest';
+import {
+  applyAlgorithm,
+  applyMove,
+  combineMoveWithStack,
+  computeTimelineStates,
+  createSolvedCube,
+  evaluatePracticeMoveStep,
+  extract2DNet,
+  generatePracticeScramble,
+  getMoveDefinition,
+  invertAlgorithm,
+  isCubeSolved,
+  isHalfOfDoubleMove,
+  parseAlgorithm,
+} from '../cubeEngine';
+import {
+  LESSONS,
+  getActiveCommentary,
+  getLayerByLayerProgress,
+  getYellowCrossExample,
+  YELLOW_CROSS_CASES,
+  getLessonInitialCube,
+} from '../../data/curriculum';
+import { computeAo5, formatTimeMs } from '../../utils/storage';
+import {
+  formatCubeCommentaryForSpeech,
+  narrationEngine,
+} from '../../utils/narrationEngine';
+
+describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
+  it('creates a solved 27-cubie 3x3 cube with correct piece types', () => {
+    const cube = createSolvedCube();
+    expect(cube).toHaveLength(27);
+    expect(cube.filter((c) => c.type === 'core')).toHaveLength(1);
+    expect(cube.filter((c) => c.type === 'center')).toHaveLength(6);
+    expect(cube.filter((c) => c.type === 'edge')).toHaveLength(12);
+    expect(cube.filter((c) => c.type === 'corner')).toHaveLength(8);
+    expect(isCubeSolved(cube)).toBe(true);
+  });
+
+  it('satisfies R followed by R\' returns to solved state for all base moves', () => {
+    const bases = ['R', 'L', 'U', 'D', 'F', 'B', 'M', 'E', 'S', 'r', 'l', 'u', 'f', 'x', 'y', 'z'];
+    for (const b of bases) {
+      const solved = createSolvedCube();
+      const moved = applyMove(solved, b);
+      const restored = applyMove(moved, `${b}'`);
+      expect(isCubeSolved(restored)).toBe(true);
+      expect(restored).toEqual(solved);
+
+      const doubleMoved = applyMove(solved, `${b}2`);
+      const doubleRestored = applyMove(doubleMoved, `${b}2`);
+      expect(doubleRestored).toEqual(solved);
+    }
+  });
+
+  it('preserves solved state under whole-cube rotations x, y, z', () => {
+    const solved = createSolvedCube();
+    const rotated = applyAlgorithm(solved, "x y2 z' x'");
+    expect(isCubeSolved(rotated)).toBe(true);
+  });
+
+  it('satisfies (R U R\' U\')^6 === Identity (order 6 of Sexy Move)', () => {
+    let cube = createSolvedCube();
+    for (let i = 0; i < 6; i++) {
+      cube = applyAlgorithm(cube, "R U R' U'");
+      if (i < 5) {
+        expect(isCubeSolved(cube)).toBe(false);
+      }
+    }
+    expect(isCubeSolved(cube)).toBe(true);
+  });
+
+  it('satisfies T-Perm and H-Perm order 2 (self-inverse)', () => {
+    const solved = createSolvedCube();
+    const tPerm = "R U R' U' R' F R2 U' R' U' R U R' F'";
+    const afterOneT = applyAlgorithm(solved, tPerm);
+    expect(isCubeSolved(afterOneT)).toBe(false);
+    const afterTwoT = applyAlgorithm(afterOneT, tPerm);
+    expect(isCubeSolved(afterTwoT)).toBe(true);
+
+    const hPerm = 'M2 U M2 U2 M2 U M2';
+    const afterOneH = applyAlgorithm(solved, hPerm);
+    expect(isCubeSolved(afterOneH)).toBe(false);
+    const afterTwoH = applyAlgorithm(afterOneH, hPerm);
+    expect(isCubeSolved(afterTwoH)).toBe(true);
+  });
+
+  it('verifies all 16 lessons reach their own goal after the formula', () => {
+    expect(LESSONS).toHaveLength(16);
+    for (const lesson of LESSONS) {
+      const initial = getLessonInitialCube(lesson);
+      expect(
+        lesson.checkGoal(initial),
+        `Lesson ${lesson.id} should start at the intended goal state`
+      ).toBe(lesson.id === 'basics-structure');
+
+      const moves = parseAlgorithm(lesson.formula);
+      const states = computeTimelineStates(initial, moves);
+      expect(states).toHaveLength(moves.length + 1);
+
+      const finalState = states[states.length - 1];
+      expect(
+        lesson.checkGoal(finalState),
+        `Lesson ${lesson.id} should satisfy goal after executing ${lesson.formula}`
+      ).toBe(true);
+      expect(isCubeSolved(finalState)).toBe(!lesson.exampleEndSetup);
+    }
+  });
+
+  it('rewinds the first lesson one move at a time from its midpoint', () => {
+    const lesson = LESSONS[0];
+    const states = computeTimelineStates(getLessonInitialCube(lesson), parseAlgorithm(lesson.formula));
+    expect(states[0]).toEqual(createSolvedCube());
+    expect(states.slice(4)).toEqual(states.slice(0, 3).reverse());
+  });
+
+  it('stops each layer-by-layer example at its own milestone and recognizes rotated positions', () => {
+    const lessons = LESSONS.filter((lesson) => lesson.stageId === 'lbl');
+    for (const [index, lesson] of lessons.entries()) {
+      const start = getLessonInitialCube(lesson);
+      const end = applyAlgorithm(start, lesson.formula);
+      expect(getLayerByLayerProgress(start)).toBe(index);
+      expect(getLayerByLayerProgress(end)).toBe(index + 1);
+      expect(getLayerByLayerProgress(applyAlgorithm(end, "x y'"))).toBe(index + 1);
+    }
+  });
+
+  it('demonstrates all three yellow cross shapes while leaving the corner orientation for the next lesson', () => {
+    const lesson = LESSONS.find((item) => item.id === 'lbl-step4-yellow-cross')!;
+    const topEdges = (cube: ReturnType<typeof createSolvedCube>) =>
+      cube.filter((cubie) => cubie.type === 'edge' && cubie.faces.U === 'Y')
+        .map((cubie) => cubie.pos.join(',')).sort();
+    const line = ['-1,1,0', '1,1,0'];
+    const corner = ['0,1,1', '1,1,0'];
+    const vertical = ['0,1,-1', '0,1,1'];
+    const expectedShapes = [
+      [[0, line]],
+      [[0, corner], [6, vertical], [7, line]],
+      [[0, []], [6, corner], [12, vertical], [13, line]],
+    ] as const;
+
+    for (const [index, { id }] of YELLOW_CROSS_CASES.entries()) {
+      const example = getYellowCrossExample(lesson, id);
+      const states = computeTimelineStates(getLessonInitialCube(example), parseAlgorithm(example.formula));
+      for (const [step, shape] of expectedShapes[index]) {
+        expect(topEdges(states[step])).toEqual(shape);
+      }
+      expect(example.stepCommentaries).toHaveLength(states.length - 1);
+      expect(getLayerByLayerProgress(states[states.length - 1])).toBe(4);
+    }
+  });
+
+  it('verifies all 16 lessons have complete Chinese intro, step-by-step, and completion commentaries matching formula length', () => {
+    for (const lesson of LESSONS) {
+      const moves = parseAlgorithm(lesson.formula);
+      expect(lesson.introCommentary.trim().length).toBeGreaterThan(15);
+      expect(lesson.completionCommentary.trim().length).toBeGreaterThan(15);
+      expect(
+        lesson.stepCommentaries,
+        `Lesson ${lesson.id} stepCommentaries length must equal move count`
+      ).toHaveLength(moves.length);
+
+      lesson.stepCommentaries.forEach((commentary, idx) => {
+        expect(commentary.trim().length).toBeGreaterThan(10);
+        expect(commentary).toContain(`第 ${idx + 1} 步`);
+      });
+    }
+  });
+
+  it('computes accurate synchronized Chinese commentary across demo, practice, half-turn, error, and sandbox states', () => {
+    const lesson = LESSONS.find((l) => l.id === 'lbl-step5-sune')!;
+    const moves = parseAlgorithm(lesson.formula); // 7 steps
+
+    // 1. Demo Step 0 (Intro)
+    const demoIntro = getActiveCommentary({
+      workspaceMode: 'course',
+      lesson,
+      lessonTab: 'demo',
+      demoStep: 0,
+      practiceStep: 0,
+      practiceHalfTurnPending: false,
+      practiceHalfTurnToken: null,
+      practiceErrors: [],
+      practiceJustSucceeded: false,
+      autoSolveQueue: [],
+      timerRunning: false,
+      isSandboxSolved: true,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(demoIntro.phase).toBe('intro');
+    expect(demoIntro.headline).toBe(lesson.introCommentary);
+    expect(demoIntro.stepIndex).toBeNull();
+
+    // 2. Demo Step 3 (Intermediate step)
+    const demoStep3 = getActiveCommentary({
+      workspaceMode: 'course',
+      lesson,
+      lessonTab: 'demo',
+      demoStep: 3,
+      practiceStep: 0,
+      practiceHalfTurnPending: false,
+      practiceHalfTurnToken: null,
+      practiceErrors: [],
+      practiceJustSucceeded: false,
+      autoSolveQueue: [],
+      timerRunning: false,
+      isSandboxSolved: true,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(demoStep3.phase).toBe('step');
+    expect(demoStep3.headline).toBe(lesson.stepCommentaries[2]);
+    expect(demoStep3.stepIndex).toBe(2);
+
+    // 3. Demo Final Step (Completed)
+    const demoDone = getActiveCommentary({
+      workspaceMode: 'course',
+      lesson,
+      lessonTab: 'demo',
+      demoStep: moves.length,
+      practiceStep: 0,
+      practiceHalfTurnPending: false,
+      practiceHalfTurnToken: null,
+      practiceErrors: [],
+      practiceJustSucceeded: false,
+      autoSolveQueue: [],
+      timerRunning: false,
+      isSandboxSolved: true,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(demoDone.phase).toBe('completed');
+    expect(demoDone.detail).toContain(lesson.completionCommentary);
+
+    // 4. Practice 180-degree half-turn pending
+    const pracHalf = getActiveCommentary({
+      workspaceMode: 'course',
+      lesson,
+      lessonTab: 'practice',
+      demoStep: 0,
+      practiceStep: 5,
+      practiceHalfTurnPending: true,
+      practiceHalfTurnToken: 'U',
+      practiceErrors: [],
+      practiceJustSucceeded: false,
+      autoSolveQueue: [],
+      timerRunning: false,
+      isSandboxSolved: true,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(pracHalf.phase).toBe('practice-half');
+    expect(pracHalf.headline).toContain('U2');
+
+    // 5. Practice Error state
+    const pracErr = getActiveCommentary({
+      workspaceMode: 'course',
+      lesson,
+      lessonTab: 'practice',
+      demoStep: 0,
+      practiceStep: 2,
+      practiceHalfTurnPending: false,
+      practiceHalfTurnToken: null,
+      practiceErrors: ['F'],
+      practiceJustSucceeded: false,
+      autoSolveQueue: [],
+      timerRunning: false,
+      isSandboxSolved: true,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(pracErr.phase).toBe('practice-error');
+    expect(pracErr.headline).toContain("F'");
+
+    // 6. Sandbox Auto-Solving state
+    const sandboxAuto = getActiveCommentary({
+      workspaceMode: 'sandbox',
+      lesson,
+      lessonTab: 'demo',
+      demoStep: 0,
+      practiceStep: 0,
+      practiceHalfTurnPending: false,
+      practiceHalfTurnToken: null,
+      practiceErrors: [],
+      practiceJustSucceeded: false,
+      autoSolveQueue: ['R', "U'"],
+      timerRunning: false,
+      isSandboxSolved: false,
+      fullPracticeProgress: null,
+      timerArmedAfterScramble: false,
+    });
+    expect(sandboxAuto.phase).toBe('sandbox');
+    expect(sandboxAuto.badgeText).toContain('剩余 2 步');
+  });
+
+  it('formats Rubik notation tokens and symbols into natural Chinese TTS speech', () => {
+    const raw =
+      "🎉 第 3 步 R'（下）：将 U2、R2' 与 r'、u2 旋转 180° → 回到 90°！【白-蓝-红角块】T-Perm 执行 1~3 次";
+    const formatted = formatCubeCommentaryForSpeech(raw);
+    expect(formatted).not.toContain('🎉');
+    expect(formatted).toContain('R撇');
+    expect(formatted).toContain('U二');
+    expect(formatted).toContain('R二');
+    expect(formatted).not.toContain("R二'");
+    expect(formatted).toContain('r撇');
+    expect(formatted).toContain('u二');
+    expect(formatted).toContain('180度');
+    expect(formatted).toContain('90度');
+    expect(formatted).toContain('白、蓝、红角块');
+    expect(formatted).toContain('T Perm');
+    expect(formatted).toContain('1到3 次');
+
+    // Verify narrationEngine enable/disable & subscription lifecycle
+    const events: boolean[] = [];
+    const unsub = narrationEngine.subscribe((speaking) => events.push(speaking));
+    narrationEngine.setEnabled(false);
+    expect(narrationEngine.isEnabled()).toBe(false);
+    let ended = false;
+    narrationEngine.speak('测试关闭状态不播报', {
+      onEnd: () => {
+        ended = true;
+      },
+    });
+    expect(ended).toBe(true);
+    narrationEngine.setEnabled(true);
+    unsub();
+  });
+
+  it('generates practice scrambles without consecutive redundant moves and inverts them cleanly', () => {
+    const scramble = generatePracticeScramble(20);
+    expect(scramble).toHaveLength(20);
+    for (let i = 1; i < scramble.length; i++) {
+      expect(scramble[i][0]).not.toBe(scramble[i - 1][0]);
+    }
+    const solved = createSolvedCube();
+    const scrambled = applyAlgorithm(solved, scramble);
+    expect(isCubeSolved(scrambled)).toBe(false);
+    const unscrambled = applyAlgorithm(scrambled, invertAlgorithm(scramble));
+    expect(isCubeSolved(unscrambled)).toBe(true);
+  });
+
+  it('extracts a 54-sticker 2D net that accurately reflects face colors', () => {
+    const solved = createSolvedCube();
+    const net = extract2DNet(solved);
+    expect(net.U.flat().every((s) => s.color === 'Y')).toBe(true);
+    expect(net.D.flat().every((s) => s.color === 'W')).toBe(true);
+    expect(net.F.flat().every((s) => s.color === 'B')).toBe(true);
+    expect(net.B.flat().every((s) => s.color === 'G')).toBe(true);
+    expect(net.L.flat().every((s) => s.color === 'O')).toBe(true);
+    expect(net.R.flat().every((s) => s.color === 'R')).toBe(true);
+  });
+
+  it('handles edge cases: empty algorithm, parentheses, curly apostrophes, and invalid move tokens', () => {
+    const solved = createSolvedCube();
+    expect(parseAlgorithm('')).toEqual([]);
+    expect(parseAlgorithm("  (R U R’ U') [F2] ")).toEqual(['R', 'U', "R’", "U'", 'F2']);
+    expect(applyAlgorithm(solved, '')).toEqual(solved);
+    expect(getMoveDefinition('R’').token).toBe("R'");
+    expect(() => getMoveDefinition('Z_INVALID')).toThrow(/Unknown move token/);
+  });
+
+  it('recognizes half-turn moves toward a 180-degree double turn', () => {
+    expect(isHalfOfDoubleMove('R', 'R2')).toBe(true);
+    expect(isHalfOfDoubleMove("R'", 'R2')).toBe(true);
+    expect(isHalfOfDoubleMove('U', 'R2')).toBe(false);
+    expect(isHalfOfDoubleMove('R2', 'R2')).toBe(false);
+  });
+
+  it('combines and cancels consecutive same-layer moves on a move stack', () => {
+    expect(combineMoveWithStack([], 'R')).toEqual(['R']);
+    expect(combineMoveWithStack(['R'], 'R')).toEqual(['R2']);
+    expect(combineMoveWithStack(['R2'], 'R')).toEqual(["R'"]);
+    expect(combineMoveWithStack(["R'"], 'R')).toEqual([]);
+    expect(combineMoveWithStack(['R'], "R'")).toEqual([]);
+    expect(combineMoveWithStack(['R2'], 'R2')).toEqual([]);
+    expect(combineMoveWithStack(['R2'], "R'")).toEqual(['R']);
+    expect(combineMoveWithStack(['R', 'U'], "U'")).toEqual(['R']);
+  });
+
+  it('maintains exact practice progression under double-turn half-steps, opposite cancellation, and error recovery', () => {
+    const suneLesson = LESSONS.find((l) => l.id === 'lbl-step5-sune')!;
+    const lessonMoves = parseAlgorithm(suneLesson.formula); // ['R', 'U', "R'", 'U', 'R', 'U2', "R'"]
+    const timeline = computeTimelineStates(getLessonInitialCube(suneLesson), lessonMoves);
+
+    // Start at step 5 (expecting 'U2')
+    let state = { step: 5, halfTurnToken: null as string | null, errors: [] as string[] };
+    let cube = timeline[5];
+
+    // 1. User executes 'U' (first 90 deg) -> halfTurnToken = 'U'
+    state = evaluatePracticeMoveStep(state, 'U', lessonMoves);
+    cube = applyMove(cube, 'U');
+    expect(state.step).toBe(5);
+    expect(state.halfTurnToken).toBe('U');
+    expect(state.errors).toEqual([]);
+
+    // 2. User executes opposite "U'" -> cancels halfTurnToken back to null at step 5 (does NOT falsely advance to step 6!)
+    state = evaluatePracticeMoveStep(state, "U'", lessonMoves);
+    cube = applyMove(cube, "U'");
+    expect(state.step).toBe(5);
+    expect(state.halfTurnToken).toBeNull();
+    expect(state.errors).toEqual([]);
+    expect(cube).toEqual(timeline[5]);
+
+    // 3. User executes 'U' again, then makes an unrelated error 'F'
+    state = evaluatePracticeMoveStep(state, 'U', lessonMoves);
+    cube = applyMove(cube, 'U');
+    state = evaluatePracticeMoveStep(state, 'F', lessonMoves);
+    cube = applyMove(cube, 'F');
+    expect(state.step).toBe(5);
+    expect(state.halfTurnToken).toBe('U');
+    expect(state.errors).toEqual(['F']);
+
+    // 4. User undoes error with "F'" -> restores halfTurnToken 'U' with empty errors
+    state = evaluatePracticeMoveStep(state, "F'", lessonMoves);
+    cube = applyMove(cube, "F'");
+    expect(state.step).toBe(5);
+    expect(state.halfTurnToken).toBe('U');
+    expect(state.errors).toEqual([]);
+
+    // 5. User executes second 'U' -> completes 'U2' and advances to step 6
+    state = evaluatePracticeMoveStep(state, 'U', lessonMoves);
+    cube = applyMove(cube, 'U');
+    expect(state.step).toBe(6);
+    expect(state.halfTurnToken).toBeNull();
+    expect(state.errors).toEqual([]);
+    expect(cube).toEqual(timeline[6]);
+
+    // 6. User executes final move "R'" -> solves lesson
+    state = evaluatePracticeMoveStep(state, "R'", lessonMoves);
+    cube = applyMove(cube, "R'");
+    expect(state.step).toBe(7);
+    expect(suneLesson.checkGoal(cube)).toBe(true);
+    expect(isCubeSolved(cube)).toBe(false);
+
+    // 7. Reducing a 180° error move ['F2'] by 90° ('F') is recognized as progress (not a new mistake)
+    let errState = evaluatePracticeMoveStep(
+      { step: 0, halfTurnToken: null, errors: [] },
+      'F2',
+      lessonMoves
+    );
+    expect(errState.errors).toEqual(['F2']);
+    expect(errState.madeMistake).toBe(true);
+    errState = evaluatePracticeMoveStep(errState, "F'", lessonMoves);
+    expect(errState.errors).toEqual(['F']);
+    expect(errState.stepAdvanced).toBe(true);
+    expect(errState.madeMistake).toBe(false);
+  });
+
+  it('computes WCA Ao5 and formats timer milliseconds accurately', () => {
+    expect(formatTimeMs(0)).toBe('0.00s');
+    expect(formatTimeMs(9450)).toBe('9.45s');
+    expect(formatTimeMs(65230)).toBe('1:05.23');
+
+    expect(computeAo5([])).toBeNull();
+    const records = [
+      { id: '1', timeMs: 10000, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '2', timeMs: 12000, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '3', timeMs: 8000, scramble: '', createdAt: '', moveCount: 20 }, // fastest dropped
+      { id: '4', timeMs: 20000, scramble: '', createdAt: '', moveCount: 20 }, // slowest dropped
+      { id: '5', timeMs: 14000, scramble: '', createdAt: '', moveCount: 20 },
+    ];
+    // Middle 3: 10000, 12000, 14000 -> avg = 12000
+    expect(computeAo5(records)).toBe(12000);
+  });
+});
