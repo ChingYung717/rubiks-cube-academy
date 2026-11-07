@@ -36,17 +36,105 @@ import { NotationGuideModal } from './components/NotationGuideModal';
 import { soundEngine } from './utils/soundEngine';
 import { narrationEngine } from './utils/narrationEngine';
 import {
+  PlaybackSpeed,
   SolvePenalty,
   SolveRecord,
   SolveStats,
+  getLastStorageSaveError,
   loadCompletedLessons,
   loadSettings,
   loadSolveRecords,
   loadSolveStats,
   saveCompletedLessons,
   saveSettings,
-  saveSolveRecords,
+  saveSolveRecordsWithStatus,
 } from './utils/storage';
+
+const INTERACTIVE_SELECTOR =
+  'button, a, input, textarea, select, summary, option, dialog, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], [role="combobox"], [role="listbox"], [role="slider"], [role="spinbutton"], [role="textbox"], [role="searchbox"], [role="dialog"], [aria-modal="true"], [contenteditable]:not([contenteditable="false"])';
+
+const INTERACTIVE_TAGS = new Set([
+  'INPUT',
+  'TEXTAREA',
+  'SELECT',
+  'BUTTON',
+  'A',
+  'SUMMARY',
+  'OPTION',
+  'DIALOG',
+]);
+
+const INTERACTIVE_ROLES = new Set([
+  'button',
+  'link',
+  'tab',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'option',
+  'switch',
+  'checkbox',
+  'radio',
+  'combobox',
+  'listbox',
+  'slider',
+  'spinbutton',
+  'textbox',
+  'searchbox',
+  'dialog',
+]);
+
+export function isInteractiveOrEditableTarget(target: EventTarget | null): boolean {
+  if (!target || typeof target !== 'object') return false;
+
+  const maybeEl = target as {
+    tagName?: string;
+    isContentEditable?: boolean;
+    getAttribute?: (name: string) => string | null;
+    closest?: (selector: string) => unknown;
+    parentElement?: unknown;
+    parentNode?: unknown;
+  };
+
+  if (maybeEl.isContentEditable === true) {
+    return true;
+  }
+
+  if (typeof maybeEl.closest === 'function') {
+    try {
+      if (maybeEl.closest(INTERACTIVE_SELECTOR)) {
+        return true;
+      }
+    } catch {
+      // Fallback to manual ancestor walk below
+    }
+  }
+
+  let node: typeof maybeEl | null = maybeEl;
+  while (node && typeof node === 'object') {
+    if (node.isContentEditable === true) return true;
+    if (typeof node.tagName === 'string' && INTERACTIVE_TAGS.has(node.tagName.toUpperCase())) {
+      return true;
+    }
+    if (typeof node.getAttribute === 'function') {
+      const role = node.getAttribute('role');
+      if (role && INTERACTIVE_ROLES.has(role.trim().toLowerCase())) {
+        return true;
+      }
+      const ariaModal = node.getAttribute('aria-modal');
+      if (ariaModal && ariaModal.trim().toLowerCase() === 'true') {
+        return true;
+      }
+      const ce = node.getAttribute('contenteditable');
+      if (ce !== null && ce.trim().toLowerCase() !== 'false') {
+        return true;
+      }
+    }
+    node = ((node.parentElement ?? node.parentNode) as typeof maybeEl | null) ?? null;
+  }
+
+  return false;
+}
 
 export const App: React.FC = () => {
   // Persisted settings & records
@@ -58,7 +146,7 @@ export const App: React.FC = () => {
   const [focusMode, setFocusMode] = useState(initialSettings.focusMode);
   const [show3DArrows, setShow3DArrows] = useState(initialSettings.show3DArrows);
   const [show2DNet, setShow2DNet] = useState(initialSettings.show2DNet);
-  const [playbackSpeed, setPlaybackSpeed] = useState(initialSettings.playbackSpeed);
+  const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(initialSettings.playbackSpeed);
   const playbackSpeedRef = useRef(playbackSpeed);
   playbackSpeedRef.current = playbackSpeed;
 
@@ -77,6 +165,9 @@ export const App: React.FC = () => {
   const [solveStats, setSolveStats] = useState<SolveStats>(() =>
     loadSolveStats()
   );
+  const [storageSaveError, setStorageSaveError] = useState<string | null>(() =>
+    getLastStorageSaveError()
+  );
 
   // Workspace & Lesson state
   const [workspaceMode, setWorkspaceMode] = useState<'course' | 'sandbox'>('course');
@@ -91,7 +182,9 @@ export const App: React.FC = () => {
   const [lessonTab, setLessonTab] = useState<'demo' | 'practice'>('demo');
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [webGLUnavailable, setWebGLUnavailable] = useState(false);
-  const handleWebGLUnavailable = useCallback(() => setWebGLUnavailable(true), []);
+  const handleWebGLUnavailable = useCallback((unavailable = true) => {
+    setWebGLUnavailable(unavailable);
+  }, []);
   // Mobile/Tablet (<1024px) active pane switcher
   const [mobilePane, setMobilePane] = useState<'curriculum' | 'stage' | 'guide'>('stage');
   const stageRef = useRef<HTMLElement>(null);
@@ -160,9 +253,14 @@ export const App: React.FC = () => {
   }, []);
 
   // Sync settings to localStorage, soundEngine & narrationEngine
+  const isInitialSettingsSyncRef = useRef(true);
   useEffect(() => {
     soundEngine.setEnabled(soundEnabled);
     narrationEngine.setEnabled(narrationEnabled);
+    if (isInitialSettingsSyncRef.current) {
+      isInitialSettingsSyncRef.current = false;
+      return;
+    }
     saveSettings({
       soundEnabled,
       narrationEnabled,
@@ -171,6 +269,7 @@ export const App: React.FC = () => {
       show2DNet,
       playbackSpeed,
     });
+    setStorageSaveError(getLastStorageSaveError());
   }, [
     soundEnabled,
     narrationEnabled,
@@ -228,6 +327,7 @@ export const App: React.FC = () => {
       if (prev.includes(lessonId)) return prev;
       const next = [...prev, lessonId];
       saveCompletedLessons(next);
+      setStorageSaveError(getLastStorageSaveError());
       return next;
     });
   }, []);
@@ -788,9 +888,10 @@ export const App: React.FC = () => {
               };
               setSolveRecords((prev) => {
                 const updated = [newRecord, ...prev];
-                const persisted = saveSolveRecords(updated);
-                setSolveStats(loadSolveStats());
-                return persisted;
+                const result = saveSolveRecordsWithStatus(updated);
+                setSolveStats(result.stats);
+                setStorageSaveError(result.error);
+                return result.records;
               });
               triggerVictoryCelebration();
               narrationEngine.speak(
@@ -1049,27 +1150,21 @@ export const App: React.FC = () => {
   }, []);
 
   const handleClearSolveRecords = useCallback(() => {
-    const persisted = saveSolveRecords([]);
-    setSolveRecords(persisted);
-    setSolveStats(loadSolveStats());
+    const result = saveSolveRecordsWithStatus([]);
+    setSolveRecords(result.records);
+    setSolveStats(result.stats);
+    setStorageSaveError(result.error);
   }, []);
 
   // Global Keyboard Shortcuts (R, L, U, D, F, B, M, Space)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        isGuideOpen
-      ) {
+      if (isGuideOpen || isInteractiveOrEditableTarget(e.target)) {
         return;
       }
 
       if (e.code === 'Space') {
-        if (
-          e.metaKey || e.ctrlKey || e.altKey || e.shiftKey ||
-          (e.target instanceof Element && e.target.closest('button, a, [role="button"], [contenteditable]'))
-        ) {
+        if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) {
           return;
         }
         e.preventDefault();
@@ -1165,9 +1260,10 @@ export const App: React.FC = () => {
   const handleUpdateSolvePenalty = useCallback((id: string, penalty: SolvePenalty) => {
     setSolveRecords((prev) => {
       const next = prev.map((r) => (r.id === id ? { ...r, penalty } : r));
-      const persisted = saveSolveRecords(next);
-      setSolveStats(loadSolveStats());
-      return persisted;
+      const result = saveSolveRecordsWithStatus(next);
+      setSolveStats(result.stats);
+      setStorageSaveError(result.error);
+      return result.records;
     });
   }, []);
 
@@ -1359,6 +1455,7 @@ export const App: React.FC = () => {
             sandboxMoveHistory={sandboxMoveHistory}
             solveRecords={solveRecords}
             solveStats={solveStats}
+            storageSaveError={storageSaveError}
             onGenerateNewScramble={handleGenerateNewScramble}
             onResetSandboxCube={handleResetSandboxCube}
             onToggleTimer={handleToggleTimer}
