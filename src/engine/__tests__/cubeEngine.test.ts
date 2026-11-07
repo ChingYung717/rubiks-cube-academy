@@ -1256,8 +1256,40 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 550,
       });
 
-      // Out-of-band corruption in SOLVE_STATS (e.g. recentEntries: [] or invalid 0ms PB) falls back to visible window
+      // When recentEntries is partially corrupted/truncated/empty but recentIds matches the 50-record window,
+      // validated archivedCount and archivedBestTimeMs are preserved rather than lost
       const backupStats = store['cubelab_solve_stats_v1'];
+      const parsedBackup = JSON.parse(backupStats);
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        ...parsedBackup,
+        recentEntries: parsedBackup.recentEntries.slice(0, 49),
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 127,
+        bestTimeMs: 550,
+      });
+
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        ...parsedBackup,
+        recentEntries: [],
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 127,
+        bestTimeMs: 550,
+      });
+
+      // If archivedBestTimeMs is corrupted (<= 0) while recentIds matches, archivedCount is kept and PB safely falls back to visible window PB
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        ...parsedBackup,
+        recentEntries: [],
+        archivedBestTimeMs: 0,
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 127,
+        bestTimeMs: 2600,
+      });
+
+      // Out-of-band corruption in SOLVE_STATS without matching recentIds (e.g. recentEntries: [] and no recentIds) falls back to visible window
       store['cubelab_solve_stats_v1'] = JSON.stringify({
         version: 1,
         totalSolves: 999,
@@ -1753,17 +1785,41 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     controller.handleContextLost();
     expect(controller.getStatus()).toBe('context-lost');
 
-    // 7. Rapid synchronous loss -> restore -> loss before scene effect runs markSceneHealthy:
-    // markSceneHealthy must NOT overwrite 'context-lost' or 'fallback-2d' back to 'healthy'
+    // 7. Canvas generation isolation & pre-listener context loss checks on rebuild:
+    // Late context-lost events from a superseded canvas generation must NOT pollute the new generation,
+    // a newly created healthy renderer (isContextLost: false) restores status to 'healthy',
+    // and a newly created renderer already in lost state (isContextLost: true) triggers context-lost instead of 'healthy'.
     controller.retry3D();
-    controller.markSceneHealthy();
-    controller.handleContextLost();
-    controller.handleContextRestored();
+    const genA = controller.getGeneration();
+    controller.markSceneHealthy({ isContextLost: false, generation: genA });
+    expect(controller.getStatus()).toBe('healthy');
+
+    controller.handleContextLost(undefined, genA);
+    expect(controller.getStatus()).toBe('context-lost');
+    controller.handleContextRestored(genA);
     expect(controller.getStatus()).toBe('rebuilding');
-    controller.handleContextLost();
+    const genB = controller.getGeneration();
+    expect(genB).toBeGreaterThan(genA);
+
+    // Late webglcontextlost from old canvas (genA) during the 30-60ms React effect window is ignored
+    controller.handleContextLost(undefined, genA);
+    expect(controller.getStatus()).toBe('rebuilding');
+    expect(controller.getConsecutiveLosses()).toBe(1);
+
+    // Even if status became 'context-lost' before the new healthy canvas (isContextLost: false) finishes mounting,
+    // markSceneHealthy({ isContextLost: false, generation: genB }) restores status to 'healthy'
+    controller.handleContextLost(undefined, genB);
     expect(controller.getStatus()).toBe('context-lost');
-    controller.markSceneHealthy();
+    controller.markSceneHealthy({ isContextLost: false, generation: genB });
+    expect(controller.getStatus()).toBe('healthy');
+
+    // If a newly created renderer is already context-lost before listeners attach (isContextLost: true),
+    // markSceneHealthy({ isContextLost: true }) does NOT mark it healthy and instead triggers context loss
+    controller.retry3D();
+    const genC = controller.getGeneration();
+    controller.markSceneHealthy({ isContextLost: true, generation: genC });
     expect(controller.getStatus()).toBe('context-lost');
+    expect(controller.getConsecutiveLosses()).toBe(1);
   });
 
   it('RC-09: createOnDemandFrameScheduler achieves 0 idle/hidden rAF callbacks and wakes on demand', () => {

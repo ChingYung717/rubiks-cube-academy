@@ -318,82 +318,87 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
           ? rawBest
           : null;
 
+    const recentIdsMatchesWindow =
+      recentIds !== undefined &&
+      recentRecords.length === MAX_SOLVE_RECORDS &&
+      recentIds.length === recentRecords.length &&
+      recentRecords.every((r, idx) => r.id === recentIds[idx]);
+
     if (recentEntries !== undefined) {
       if (recentEntries.length === 0 || recentEntries.length > MAX_SOLVE_RECORDS) {
-        return {
-          ...fallbackStats(),
-          recentIds,
-          recentEntries,
-        };
-      }
-      const exactMatch =
-        recentRecords.length === MAX_SOLVE_RECORDS &&
-        recentEntries.length === MAX_SOLVE_RECORDS &&
-        recentRecords.every(
-          (r, idx) => r.id === recentEntries[idx].id && r.timeMs === recentEntries[idx].timeMs
-        );
-      if (!exactMatch) {
-        // Check if recentRecords is a k-step forward window shift where SOLVE_STATS write failed
-        let shiftK = -1;
-        if (recentRecords.length === MAX_SOLVE_RECORDS) {
-          for (let k = 1; k < MAX_SOLVE_RECORDS; k++) {
-            const overlapLen = MAX_SOLVE_RECORDS - k;
-            if (overlapLen > recentEntries.length) continue;
-            const overlapMatches = recentRecords
-              .slice(k)
-              .every(
-                (r, idx) =>
-                  r.id === recentEntries[idx].id && r.timeMs === recentEntries[idx].timeMs
-              );
-            if (overlapMatches) {
-              shiftK = k;
-              break;
-            }
-          }
-        }
-        if (shiftK > 0) {
-          const shiftedEntries = recentEntries.slice(MAX_SOLVE_RECORDS - shiftK);
-          for (const ev of shiftedEntries) {
-            if (ev.countable) {
-              archivedCount += 1;
-              if (ev.effectiveTimeMs !== null) {
-                archivedBestTimeMs = minNonNull(archivedBestTimeMs, ev.effectiveTimeMs);
-              }
-            }
-          }
-          const reconciledIds = recentRecords.map((r) => r.id);
-          const reconciledEntries: PersistedWindowEntry[] = recentRecords.map((r) => ({
-            id: r.id,
-            timeMs: r.timeMs,
-            effectiveTimeMs: getEffectiveSolveTimeMs(r),
-            countable: r.moveCount > 0,
-          }));
-          const shiftedSig = shiftedEntries.map((ev) => `${ev.id}:${ev.timeMs}`).join('|');
-          const reconciledSig = shiftedSig || lastEvictedSig;
-          return {
-            version: STORAGE_SCHEMA_VERSION,
-            totalSolves: archivedCount + windowStats.countableSolves,
-            bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
-            archivedCount,
-            archivedBestTimeMs,
-            recentIds: reconciledIds,
-            recentEntries: reconciledEntries,
-            ...(reconciledSig !== undefined ? { lastEvictedSig: reconciledSig } : {}),
-          };
-        } else {
+        if (!recentIdsMatchesWindow) {
           return {
             ...fallbackStats(),
             recentIds,
             recentEntries,
           };
         }
+      } else {
+        const exactMatch =
+          recentRecords.length === MAX_SOLVE_RECORDS &&
+          recentEntries.length === MAX_SOLVE_RECORDS &&
+          recentRecords.every(
+            (r, idx) => r.id === recentEntries[idx].id && r.timeMs === recentEntries[idx].timeMs
+          );
+        if (!exactMatch) {
+          // Check if recentRecords is a k-step forward window shift where SOLVE_STATS write failed
+          let shiftK = -1;
+          if (recentRecords.length === MAX_SOLVE_RECORDS) {
+            for (let k = 1; k < MAX_SOLVE_RECORDS; k++) {
+              const overlapLen = MAX_SOLVE_RECORDS - k;
+              if (overlapLen > recentEntries.length) continue;
+              const overlapMatches = recentRecords
+                .slice(k)
+                .every(
+                  (r, idx) =>
+                    r.id === recentEntries[idx].id && r.timeMs === recentEntries[idx].timeMs
+                );
+              if (overlapMatches) {
+                shiftK = k;
+                break;
+              }
+            }
+          }
+          if (shiftK > 0) {
+            const shiftedEntries = recentEntries.slice(MAX_SOLVE_RECORDS - shiftK);
+            for (const ev of shiftedEntries) {
+              if (ev.countable) {
+                archivedCount += 1;
+                if (ev.effectiveTimeMs !== null) {
+                  archivedBestTimeMs = minNonNull(archivedBestTimeMs, ev.effectiveTimeMs);
+                }
+              }
+            }
+            const reconciledIds = recentRecords.map((r) => r.id);
+            const reconciledEntries: PersistedWindowEntry[] = recentRecords.map((r) => ({
+              id: r.id,
+              timeMs: r.timeMs,
+              effectiveTimeMs: getEffectiveSolveTimeMs(r),
+              countable: r.moveCount > 0,
+            }));
+            const shiftedSig = shiftedEntries.map((ev) => `${ev.id}:${ev.timeMs}`).join('|');
+            const reconciledSig = shiftedSig || lastEvictedSig;
+            return {
+              version: STORAGE_SCHEMA_VERSION,
+              totalSolves: archivedCount + windowStats.countableSolves,
+              bestTimeMs: minNonNull(archivedBestTimeMs, windowStats.bestTimeMs),
+              archivedCount,
+              archivedBestTimeMs,
+              recentIds: reconciledIds,
+              recentEntries: reconciledEntries,
+              ...(reconciledSig !== undefined ? { lastEvictedSig: reconciledSig } : {}),
+            };
+          } else if (!recentIdsMatchesWindow) {
+            return {
+              ...fallbackStats(),
+              recentIds,
+              recentEntries,
+            };
+          }
+        }
       }
     } else if (recentIds !== undefined) {
-      const matchesWindow =
-        recentRecords.length === MAX_SOLVE_RECORDS &&
-        recentIds.length === recentRecords.length &&
-        recentRecords.every((r, idx) => r.id === recentIds[idx]);
-      if (!matchesWindow) {
+      if (!recentIdsMatchesWindow) {
         return {
           ...fallbackStats(),
           recentIds,
@@ -496,7 +501,6 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
 
   let recent: SolveRecord[] = valid.slice(0, MAX_SOLVE_RECORDS);
   let newlyEvicted: SolveRecord[] = valid.slice(MAX_SOLVE_RECORDS);
-  const directEvictedSig = newlyEvicted.map((r) => `${r.id}:${r.timeMs}`).join('|');
 
   const topMatchesPrevWindow =
     prevStored.length === MAX_SOLVE_RECORDS &&
@@ -538,7 +542,7 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
     }
   }
 
-  if (alignedShiftK >= 0) {
+  if (alignedShiftK > 0) {
     const mergedPrev = prevStored.map((p, idx) =>
       alignedShiftK + idx < valid.length ? valid[alignedShiftK + idx] : p
     );
@@ -552,7 +556,7 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
   }
 
   const sharesHistoryWithPrev =
-    isSameWindowUpdate || isIdempotentRepeat || alignedShiftK >= 0;
+    isSameWindowUpdate || isIdempotentRepeat || alignedShiftK > 0;
 
   let archivedCount = sharesHistoryWithPrev ? prevStats.archivedCount : 0;
   let archivedBestTimeMs = sharesHistoryWithPrev ? prevStats.archivedBestTimeMs : null;
@@ -572,10 +576,10 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
   const evictedSig = newlyEvicted.map((r) => `${r.id}:${r.timeMs}`).join('|');
   const windowStats = computeWindowStats(recent);
   const nextLastEvictedSig = isIdempotentRepeat
-    ? prevStats.lastEvictedSig ?? directEvictedSig
+    ? prevStats.lastEvictedSig
     : newlyEvicted.length > 0
       ? evictedSig
-      : isSameWindowUpdate || alignedShiftK === 0
+      : isSameWindowUpdate
         ? prevStats.lastEvictedSig
         : undefined;
 

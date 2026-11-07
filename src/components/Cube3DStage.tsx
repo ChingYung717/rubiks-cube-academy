@@ -43,6 +43,7 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
 
   let status: WebGLStageStatus = 'healthy';
   let consecutiveLosses = 0;
+  let activeGeneration = 0;
   let disposed = false;
   let ignoringDisposalLoss = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -68,14 +69,45 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
     onStatusChange?.(next);
   };
 
+  const handleContextLost = (
+    event?: { preventDefault?: () => void },
+    generation?: number
+  ) => {
+    if (disposed || ignoringDisposalLoss || status === 'fallback-2d') return;
+    if (generation !== undefined && generation !== activeGeneration) return;
+    clearRestoreTimer();
+    clearStabilityTimer();
+    consecutiveLosses += 1;
+    if (consecutiveLosses <= maxConsecutiveLosses) {
+      event?.preventDefault?.();
+      updateStatus('context-lost');
+      restoreTimer = setTimer(() => {
+        restoreTimer = null;
+        if (!disposed && status === 'context-lost') {
+          updateStatus('fallback-2d');
+        }
+      }, restoreTimeoutMs);
+    } else {
+      updateStatus('fallback-2d');
+    }
+  };
+
   return {
     getStatus: () => status,
     getConsecutiveLosses: () => consecutiveLosses,
+    getGeneration: () => activeGeneration,
     setIgnoringDisposalLoss: (ignoring: boolean) => {
       ignoringDisposalLoss = ignoring;
     },
-    markSceneHealthy: () => {
-      if (disposed || status === 'context-lost' || status === 'fallback-2d') return;
+    markSceneHealthy: (sceneState?: { isContextLost?: boolean; generation?: number }) => {
+      if (disposed || status === 'fallback-2d') return;
+      if (sceneState?.generation !== undefined && sceneState.generation !== activeGeneration) {
+        return;
+      }
+      if (sceneState?.isContextLost) {
+        handleContextLost(undefined, sceneState.generation);
+        return;
+      }
       clearRestoreTimer();
       updateStatus('healthy');
       clearStabilityTimer();
@@ -94,27 +126,12 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
       clearStabilityTimer();
       updateStatus('fallback-2d');
     },
-    handleContextLost: (event?: { preventDefault?: () => void }) => {
-      if (disposed || ignoringDisposalLoss || status === 'fallback-2d') return;
-      clearRestoreTimer();
-      clearStabilityTimer();
-      consecutiveLosses += 1;
-      if (consecutiveLosses <= maxConsecutiveLosses) {
-        event?.preventDefault?.();
-        updateStatus('context-lost');
-        restoreTimer = setTimer(() => {
-          restoreTimer = null;
-          if (!disposed && status === 'context-lost') {
-            updateStatus('fallback-2d');
-          }
-        }, restoreTimeoutMs);
-      } else {
-        updateStatus('fallback-2d');
-      }
-    },
-    handleContextRestored: () => {
+    handleContextLost,
+    handleContextRestored: (generation?: number) => {
       if (disposed || ignoringDisposalLoss || status !== 'context-lost') return;
+      if (generation !== undefined && generation !== activeGeneration) return;
       clearRestoreTimer();
+      activeGeneration += 1;
       updateStatus('rebuilding');
       onRebuildScene?.();
     },
@@ -123,6 +140,7 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
       clearRestoreTimer();
       clearStabilityTimer();
       consecutiveLosses = 0;
+      activeGeneration += 1;
       updateStatus('rebuilding');
       onRebuildScene?.();
     },
@@ -1143,10 +1161,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       }
     ).__cubelabFrameStats = () => frameScheduler.getStats();
 
-    recoveryControllerRef.current?.markSceneHealthy();
-    syncSceneForCurrentState();
-    rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
-
     // Pointer interaction: Raycast cubie sticker drag vs Orbit camera drag
     const { handlePointerDown, handlePointerMove, handlePointerUp } = createStagePointerHandlers({
       domElement: renderer.domElement,
@@ -1166,13 +1180,22 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       e.preventDefault();
     };
 
-    const handleContextLost = (e: Event) => {
+    const domElem = renderer.domElement;
+    const canvasGeneration = recoveryControllerRef.current?.getGeneration() ?? 0;
+    let canvasActive = true;
+
+    const handleContextLost = (e?: Event) => {
+      if (!canvasActive) return;
       frameScheduler.setPaused(true);
-      recoveryControllerRef.current?.handleContextLost(e);
+      recoveryControllerRef.current?.handleContextLost(e, canvasGeneration);
     };
 
     const handleContextRestored = () => {
-      recoveryControllerRef.current?.handleContextRestored();
+      if (!canvasActive) return;
+      canvasActive = false;
+      domElem.removeEventListener('webglcontextlost', handleContextLost);
+      domElem.removeEventListener('webglcontextrestored', handleContextRestored);
+      recoveryControllerRef.current?.handleContextRestored(canvasGeneration);
     };
 
     const handleWheel = (e: WheelEvent) => {
@@ -1186,7 +1209,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       frameScheduler.handleVisibilityChange();
     };
 
-    const domElem = renderer.domElement;
     domElem.style.touchAction = 'none';
     domElem.addEventListener('webglcontextlost', handleContextLost);
     domElem.addEventListener('webglcontextrestored', handleContextRestored);
@@ -1206,7 +1228,20 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     document.addEventListener('visibilitychange', handleVisibilityChange);
     domElem.addEventListener('wheel', handleWheel, { passive: false });
 
-    frameScheduler.wake();
+    const gl = typeof renderer.getContext === 'function' ? renderer.getContext() : null;
+    const isInitialContextLost =
+      typeof gl?.isContextLost === 'function' ? Boolean(gl.isContextLost()) : false;
+    if (isInitialContextLost) {
+      handleContextLost();
+    } else {
+      recoveryControllerRef.current?.markSceneHealthy({
+        isContextLost: false,
+        generation: canvasGeneration,
+      });
+      syncSceneForCurrentState();
+      rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
+      frameScheduler.wake();
+    }
 
     let lastW = width;
     let lastH = height;
@@ -1233,6 +1268,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     resizeObserver.observe(container);
 
     return () => {
+      canvasActive = false;
       wakeSchedulerRef.current = null;
       frameScheduler.dispose();
       resizeObserver.disconnect();
