@@ -1,5 +1,6 @@
 import React from 'react';
 import { getMoveDefinition } from '../engine/cubeEngine';
+import { PLAYBACK_SPEEDS, PlaybackSpeed } from '../utils/storage';
 import {
   CheckCircle2,
   ChevronFirst,
@@ -18,7 +19,7 @@ interface FormulaTimelinePlayerProps {
   moves: string[];
   currentStep: number; // 0 .. moves.length
   isPlaying: boolean;
-  playbackSpeed: number;
+  playbackSpeed: PlaybackSpeed;
   isAnimating: boolean;
   practiceHalfTurnPending?: boolean;
   practiceHalfTurnToken?: string | null;
@@ -27,13 +28,13 @@ interface FormulaTimelinePlayerProps {
   onStepForward: () => void;
   onStepBackward: () => void;
   onJumpToStep: (stepIdx: number) => void;
-  onChangeSpeed: (speed: number) => void;
+  onChangeSpeed: (speed: PlaybackSpeed) => void;
   onQuickMove: (token: string) => void;
   onUndoError?: () => void;
   onResetPractice?: () => void;
 }
 
-const SPEEDS = [0.5, 1, 1.5, 2];
+const SPEEDS = PLAYBACK_SPEEDS;
 
 const QUICK_MOVE_GROUPS = [
   { label: '右/顶高频', tokens: ['R', "R'", 'R2', 'U', "U'", 'U2'] },

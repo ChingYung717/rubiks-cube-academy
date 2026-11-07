@@ -67,6 +67,7 @@ interface RightWorkbenchPanelProps {
   sandboxMoveHistory: string[];
   solveRecords: SolveRecord[];
   solveStats?: SolveStats;
+  storageSaveError?: string | null;
   onGenerateNewScramble: () => void;
   onResetSandboxCube: () => void;
   onToggleTimer: () => void;
@@ -190,6 +191,7 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
   sandboxMoveHistory,
   solveRecords,
   solveStats,
+  storageSaveError = null,
   onGenerateNewScramble,
   onResetSandboxCube,
   onToggleTimer,
@@ -418,6 +420,17 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
             )}
           </div>
 
+          {storageSaveError && (
+            <div
+              role="alert"
+              data-testid="storage-save-error"
+              className="p-2 rounded-lg bg-rose-950/80 border border-rose-500/50 text-[11px] text-rose-200 flex items-start gap-1.5 leading-relaxed"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+              <span>{storageSaveError}</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-2">
             <div className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 text-center">
               <div className="text-[10px] text-slate-400">PB 最佳单次</div>
@@ -581,6 +594,17 @@ const RightWorkbenchPanelComponent: React.FC<RightWorkbenchPanelProps> = ({
         <h2 className="text-base font-bold text-white leading-snug">{lesson.title}</h2>
         <p className="text-xs text-slate-300 mt-1 leading-relaxed">{lesson.subtitle}</p>
       </div>
+
+      {storageSaveError && (
+        <div
+          role="alert"
+          data-testid="storage-save-error"
+          className="p-2 rounded-lg bg-rose-950/80 border border-rose-500/50 text-[11px] text-rose-200 flex items-start gap-1.5 leading-relaxed"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+          <span>{storageSaveError}</span>
+        </div>
+      )}
 
       {/* Mode Switch Tabs: 看演示 vs 动手练 */}
       <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-950 border border-slate-800">
