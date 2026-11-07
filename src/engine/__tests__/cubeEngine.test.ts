@@ -1240,6 +1240,38 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 550,
       });
 
+      // Passing a 52-record payload ([rec127, rec126, ...partial125.records]) where prevStored already has
+      // a full 50-record window (rot_126..rot_77) must NOT double-archive the 52nd trailing record (rot_76)
+      const rec127: SolveRecord = {
+        id: 'rot_127',
+        timeMs: 4020,
+        scramble: 'L2',
+        createdAt: '11:29:00',
+        moveCount: 15,
+      };
+      const saved127 = saveSolveRecordsWithStatus([rec127, rec126, ...partial125.records]);
+      expect(saved127.ok).toBe(true);
+      expect(saved127.stats).toEqual({
+        totalSolves: 127,
+        bestTimeMs: 550,
+      });
+
+      // Out-of-band corruption in SOLVE_STATS (e.g. recentEntries: [] or invalid 0ms PB) falls back to visible window
+      const backupStats = store['cubelab_solve_stats_v1'];
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        version: 1,
+        totalSolves: 999,
+        bestTimeMs: 0,
+        archivedCount: 949,
+        archivedBestTimeMs: 0,
+        recentEntries: [{ id: 'bad', timeMs: 0, effectiveTimeMs: 0, countable: true }],
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 50,
+        bestTimeMs: 2600,
+      });
+      store['cubelab_solve_stats_v1'] = backupStats;
+
       // 7. 49 -> 50 -> 51 partial writes across the initial 50-record window boundary
       saveSolveRecords([]);
       let subWindow: SolveRecord[] = [];

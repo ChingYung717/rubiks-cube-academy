@@ -739,6 +739,34 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     }
   };
 
+  const syncSceneForCurrentState = () => {
+    const activeAnim = activeAnimRef.current;
+    const animFilter = activeAnim ? getActiveLayerFilterFromToken(activeAnim.moveToken) : null;
+    if (activeAnim && animFilter) {
+      syncCubieMeshes(activeAnim.fromCube, animFilter, true);
+      const objs = sceneObjectsRef.current;
+      if (objs) {
+        const elapsed = Math.max(0, performance.now() - activeAnim.startTime);
+        const effectiveDuration = Math.max(40, activeAnim.durationMs);
+        const rawT = Math.min(1, elapsed / effectiveDuration);
+        const easedT = 1 - Math.pow(1 - rawT, 3);
+        const def = getMoveDefinition(activeAnim.moveToken);
+        const targetAngle = def.quarterTurns * (Math.PI / 2);
+        objs.pivotGroup.rotation.set(
+          def.axis === 'x' ? targetAngle * easedT : 0,
+          def.axis === 'y' ? targetAngle * easedT : 0,
+          def.axis === 'z' ? targetAngle * easedT : 0
+        );
+      }
+    } else {
+      syncCubieMeshes(
+        cubeRef.current,
+        getActiveLayerFilterFromToken(hintMoveTokenRef.current),
+        false
+      );
+    }
+  };
+
   // Helper to dispose all meshes inside arrowGroup without leaking GPU buffers
   const clearArrowGroup = (arrowGroup: THREE.Group) => {
     while (arrowGroup.children.length > 0) {
@@ -1116,7 +1144,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     ).__cubelabFrameStats = () => frameScheduler.getStats();
 
     recoveryControllerRef.current?.markSceneHealthy();
-    syncCubieMeshes(cubeRef.current, getActiveLayerFilterFromToken(hintMoveTokenRef.current));
+    syncSceneForCurrentState();
     rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
 
     // Pointer interaction: Raycast cubie sticker drag vs Orbit camera drag
@@ -1323,11 +1351,9 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     }
   }, [activeAnimation]);
 
-  // Sync static cube state & focus mode when not animating
+  // Sync cube state & focus mode (preserving active pivot attachment if rebuilding/updating mid-animation)
   useEffect(() => {
-    if (!activeAnimRef.current) {
-      syncCubieMeshes(cube, getActiveLayerFilterFromToken(hintMoveToken));
-    }
+    syncSceneForCurrentState();
   }, [cube, focusMode, isCubieFocused, hintMoveToken, sceneKey]);
 
   // Rebuild 3D directional arrow when hintMoveToken, show3DArrows, or sceneKey changes

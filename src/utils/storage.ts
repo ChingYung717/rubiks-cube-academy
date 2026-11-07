@@ -206,12 +206,20 @@ function isValidPersistedWindowEntry(item: unknown): item is PersistedWindowEntr
   if (typeof item !== 'object' || item === null || Array.isArray(item)) return false;
   const e = item as Record<string, unknown>;
   if (typeof e.id !== 'string' || !e.id.trim() || e.id.length > MAX_SOLVE_ID_LENGTH) return false;
-  if (typeof e.timeMs !== 'number' || !Number.isFinite(e.timeMs) || e.timeMs < 0) return false;
+  if (
+    typeof e.timeMs !== 'number' ||
+    !Number.isFinite(e.timeMs) ||
+    e.timeMs <= 0 ||
+    e.timeMs > MAX_SOLVE_TIME_MS
+  ) {
+    return false;
+  }
   if (
     e.effectiveTimeMs !== null &&
     (typeof e.effectiveTimeMs !== 'number' ||
       !Number.isFinite(e.effectiveTimeMs) ||
-      e.effectiveTimeMs < 0)
+      e.effectiveTimeMs <= 0 ||
+      e.effectiveTimeMs > MAX_SOLVE_TIME_MS + 2000)
   ) {
     return false;
   }
@@ -289,7 +297,8 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
     const rawBest =
       typeof obj.bestTimeMs === 'number' &&
       Number.isFinite(obj.bestTimeMs) &&
-      obj.bestTimeMs >= 0
+      obj.bestTimeMs > 0 &&
+      obj.bestTimeMs <= MAX_SOLVE_TIME_MS + 2000
         ? obj.bestTimeMs
         : null;
     const hasExplicitArchive =
@@ -302,17 +311,21 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
     let archivedBestTimeMs =
       typeof obj.archivedBestTimeMs === 'number' &&
       Number.isFinite(obj.archivedBestTimeMs) &&
-      obj.archivedBestTimeMs >= 0
+      obj.archivedBestTimeMs > 0 &&
+      obj.archivedBestTimeMs <= MAX_SOLVE_TIME_MS + 2000
         ? obj.archivedBestTimeMs
         : !hasExplicitArchive
           ? rawBest
           : null;
 
-    if (
-      recentEntries !== undefined &&
-      recentEntries.length > 0 &&
-      recentEntries.length <= MAX_SOLVE_RECORDS
-    ) {
+    if (recentEntries !== undefined) {
+      if (recentEntries.length === 0 || recentEntries.length > MAX_SOLVE_RECORDS) {
+        return {
+          ...fallbackStats(),
+          recentIds,
+          recentEntries,
+        };
+      }
       const exactMatch =
         recentRecords.length === MAX_SOLVE_RECORDS &&
         recentEntries.length === MAX_SOLVE_RECORDS &&
@@ -530,7 +543,7 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
       alignedShiftK + idx < valid.length ? valid[alignedShiftK + idx] : p
     );
     const trailingFromValid =
-      alignedShiftK + prevStored.length < valid.length
+      prevStored.length < MAX_SOLVE_RECORDS && alignedShiftK + prevStored.length < valid.length
         ? valid.slice(alignedShiftK + prevStored.length)
         : [];
     const combined = [...valid.slice(0, alignedShiftK), ...mergedPrev, ...trailingFromValid];
