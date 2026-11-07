@@ -18,6 +18,206 @@ export interface ActiveAnimation {
   onFinish: () => void;
 }
 
+export type WebGLStageStatus = 'healthy' | 'context-lost' | 'rebuilding' | 'fallback-2d';
+
+export interface WebGLRecoveryControllerOptions {
+  maxConsecutiveLosses?: number;
+  restoreTimeoutMs?: number;
+  stabilityWindowMs?: number;
+  setTimer?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (id: ReturnType<typeof setTimeout>) => void;
+  onStatusChange?: (status: WebGLStageStatus) => void;
+  onRebuildScene?: () => void;
+}
+
+export function createWebGLRecoveryController(options: WebGLRecoveryControllerOptions = {}) {
+  const {
+    maxConsecutiveLosses = 2,
+    restoreTimeoutMs = 3500,
+    stabilityWindowMs = 5000,
+    setTimer = (cb, ms) => globalThis.setTimeout(cb, ms),
+    clearTimer = (id) => globalThis.clearTimeout(id),
+    onStatusChange,
+    onRebuildScene,
+  } = options;
+
+  let status: WebGLStageStatus = 'healthy';
+  let consecutiveLosses = 0;
+  let disposed = false;
+  let ignoringDisposalLoss = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  let stabilityTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearRestoreTimer = () => {
+    if (restoreTimer !== null) {
+      clearTimer(restoreTimer);
+      restoreTimer = null;
+    }
+  };
+
+  const clearStabilityTimer = () => {
+    if (stabilityTimer !== null) {
+      clearTimer(stabilityTimer);
+      stabilityTimer = null;
+    }
+  };
+
+  const updateStatus = (next: WebGLStageStatus) => {
+    if (disposed || status === next) return;
+    status = next;
+    onStatusChange?.(next);
+  };
+
+  return {
+    getStatus: () => status,
+    getConsecutiveLosses: () => consecutiveLosses,
+    setIgnoringDisposalLoss: (ignoring: boolean) => {
+      ignoringDisposalLoss = ignoring;
+    },
+    markSceneHealthy: () => {
+      if (disposed) return;
+      clearRestoreTimer();
+      updateStatus('healthy');
+      clearStabilityTimer();
+      if (consecutiveLosses > 0) {
+        stabilityTimer = setTimer(() => {
+          stabilityTimer = null;
+          if (!disposed && status === 'healthy') {
+            consecutiveLosses = 0;
+          }
+        }, stabilityWindowMs);
+      }
+    },
+    markInitFailed: () => {
+      if (disposed) return;
+      clearRestoreTimer();
+      clearStabilityTimer();
+      updateStatus('fallback-2d');
+    },
+    handleContextLost: (event?: { preventDefault?: () => void }) => {
+      if (disposed || ignoringDisposalLoss || status === 'fallback-2d') return;
+      clearRestoreTimer();
+      clearStabilityTimer();
+      consecutiveLosses += 1;
+      if (consecutiveLosses <= maxConsecutiveLosses) {
+        event?.preventDefault?.();
+        updateStatus('context-lost');
+        restoreTimer = setTimer(() => {
+          restoreTimer = null;
+          if (!disposed && status === 'context-lost') {
+            updateStatus('fallback-2d');
+          }
+        }, restoreTimeoutMs);
+      } else {
+        updateStatus('fallback-2d');
+      }
+    },
+    handleContextRestored: () => {
+      if (disposed || ignoringDisposalLoss || status !== 'context-lost') return;
+      clearRestoreTimer();
+      updateStatus('rebuilding');
+      onRebuildScene?.();
+    },
+    retry3D: () => {
+      if (disposed) return;
+      clearRestoreTimer();
+      clearStabilityTimer();
+      consecutiveLosses = 0;
+      updateStatus('rebuilding');
+      onRebuildScene?.();
+    },
+    dispose: () => {
+      disposed = true;
+      clearRestoreTimer();
+      clearStabilityTimer();
+    },
+    revive: () => {
+      disposed = false;
+    },
+  };
+}
+
+export interface OnDemandFrameSchedulerOptions {
+  requestFrame: (cb: (now: number) => void) => number;
+  cancelFrame: (id: number) => void;
+  isHidden?: () => boolean;
+  onStepFrame: (now: number) => {
+    didRender: boolean;
+    keepAlive: boolean;
+  };
+}
+
+export function createOnDemandFrameScheduler(options: OnDemandFrameSchedulerOptions) {
+  const { requestFrame, cancelFrame, isHidden = () => false, onStepFrame } = options;
+  let pendingReqId: number | null = null;
+  let dirty = false;
+  let disposed = false;
+  let paused = false;
+  let callbackCount = 0;
+  let renderCount = 0;
+
+  const scheduleIfNeeded = () => {
+    if (disposed || paused || pendingReqId !== null) return;
+    if (isHidden()) return;
+    pendingReqId = requestFrame(runFrame);
+  };
+
+  const runFrame = (now: number) => {
+    pendingReqId = null;
+    if (disposed || paused) return;
+    callbackCount += 1;
+    if (isHidden()) {
+      dirty = true;
+      return;
+    }
+    dirty = false;
+    const { didRender, keepAlive } = onStepFrame(now);
+    if (didRender) {
+      renderCount += 1;
+    }
+    if (keepAlive || dirty) {
+      scheduleIfNeeded();
+    }
+  };
+
+  return {
+    wake: () => {
+      if (disposed) return;
+      dirty = true;
+      scheduleIfNeeded();
+    },
+    setPaused: (nextPaused: boolean) => {
+      paused = nextPaused;
+      if (paused && pendingReqId !== null) {
+        cancelFrame(pendingReqId);
+        pendingReqId = null;
+      } else if (!paused && dirty) {
+        scheduleIfNeeded();
+      }
+    },
+    handleVisibilityChange: () => {
+      if (disposed || paused) return;
+      if (!isHidden()) {
+        dirty = true;
+        scheduleIfNeeded();
+      } else if (pendingReqId !== null) {
+        cancelFrame(pendingReqId);
+        pendingReqId = null;
+        dirty = true;
+      }
+    },
+    isScheduled: () => pendingReqId !== null,
+    getStats: () => ({ callbackCount, renderCount }),
+    dispose: () => {
+      disposed = true;
+      if (pendingReqId !== null) {
+        cancelFrame(pendingReqId);
+        pendingReqId = null;
+      }
+    },
+  };
+}
+
 interface Cube3DStageProps {
   cube: Cubie[];
   activeAnimation: ActiveAnimation | null;
@@ -28,7 +228,7 @@ interface Cube3DStageProps {
   onUserMove: (moveToken: string) => void;
   modeBadgeText?: string;
   fallback: React.ReactNode;
-  onWebGLUnavailable: () => void;
+  onWebGLUnavailable: (unavailable?: boolean) => void;
 }
 
 interface CubieMeshRecord {
@@ -374,10 +574,47 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [activePresetIdx, setActivePresetIdx] = useState(0);
-  const [webGLUnavailable, setWebGLUnavailable] = useState(false);
+  const [stageStatus, setStageStatus] = useState<WebGLStageStatus>('healthy');
+  const stageStatusRef = useRef<WebGLStageStatus>('healthy');
+  stageStatusRef.current = stageStatus;
   const [sceneKey, setSceneKey] = useState(0);
-  const contextLossCountRef = useRef(0);
   const needsRenderRef = useRef(true);
+  const wakeSchedulerRef = useRef<(() => void) | null>(null);
+
+  const onWebGLUnavailableRef = useRef(onWebGLUnavailable);
+  onWebGLUnavailableRef.current = onWebGLUnavailable;
+
+  const recoveryControllerRef = useRef<ReturnType<typeof createWebGLRecoveryController> | null>(
+    null
+  );
+  if (!recoveryControllerRef.current) {
+    recoveryControllerRef.current = createWebGLRecoveryController({
+      maxConsecutiveLosses: 2,
+      restoreTimeoutMs: 3500,
+      stabilityWindowMs: 5000,
+      onStatusChange: (nextStatus) => {
+        stageStatusRef.current = nextStatus;
+        setStageStatus(nextStatus);
+        const isUnavailable = nextStatus === 'context-lost' || nextStatus === 'fallback-2d';
+        onWebGLUnavailableRef.current(isUnavailable);
+      },
+      onRebuildScene: () => {
+        setSceneKey((k) => k + 1);
+      },
+    });
+  }
+
+  useEffect(() => {
+    recoveryControllerRef.current?.revive();
+    return () => {
+      recoveryControllerRef.current?.dispose();
+    };
+  }, []);
+
+  const requestRenderWake = () => {
+    needsRenderRef.current = true;
+    wakeSchedulerRef.current?.();
+  };
 
   // Refs for mutable state accessed inside requestAnimationFrame & pointer handlers
   const cubeRef = useRef<Cubie[]>(cube);
@@ -486,7 +723,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
         }
       }
     }
-    needsRenderRef.current = true;
+    requestRenderWake();
   };
 
   const hintMoveTokenRef = useRef<string | null>(hintMoveToken);
@@ -527,7 +764,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     const { arrowGroup } = objs;
 
     clearArrowGroup(arrowGroup);
-    needsRenderRef.current = true;
+    requestRenderWake();
 
     if (!token || !show3DArrows) return;
 
@@ -640,17 +877,16 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       }
       arrowGroup.add(ringMesh);
     }
+    requestRenderWake();
   };
+
+  const isFallback2D = stageStatus === 'fallback-2d';
 
   // Initialize Three.js Scene
   useEffect(() => {
     const container = mountRef.current;
-    if (!container || webGLUnavailable) return;
+    if (!container || isFallback2D) return;
 
-    const useFallback = () => {
-      setWebGLUnavailable(true);
-      onWebGLUnavailable();
-    };
     const width = container.clientWidth || 640;
     const height = container.clientHeight || 480;
 
@@ -668,7 +904,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     try {
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     } catch {
-      useFallback();
+      recoveryControllerRef.current?.markInitFailed();
       return;
     }
     renderer.setSize(width, height);
@@ -767,6 +1003,119 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       cubieMeshes,
     };
 
+    const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+
+    // True on-demand single-shot rAF scheduler: 0 callbacks when idle or hidden
+    const frameScheduler = createOnDemandFrameScheduler({
+      requestFrame: (cb) => requestAnimationFrame(cb),
+      cancelFrame: (id) => cancelAnimationFrame(id),
+      isHidden: () => document.hidden,
+      onStepFrame: (now) => {
+        if (
+          container.clientWidth === 0 ||
+          container.clientHeight === 0 ||
+          stageStatusRef.current === 'context-lost' ||
+          stageStatusRef.current === 'fallback-2d'
+        ) {
+          return { didRender: false, keepAlive: false };
+        }
+
+        // Update camera spherical orbit with smooth damping (or instant snap under reduced motion)
+        const sph = cameraSphericalRef.current;
+        const dTheta = sph.targetTheta - sph.theta;
+        const dPhi = sph.targetPhi - sph.phi;
+        const camMoving = Math.abs(dTheta) > 0.0005 || Math.abs(dPhi) > 0.0005;
+        if (camMoving) {
+          if (reducedMotionQuery?.matches) {
+            sph.theta = sph.targetTheta;
+            sph.phi = sph.targetPhi;
+          } else {
+            sph.theta += dTheta * 0.14;
+            sph.phi += dPhi * 0.14;
+            if (
+              Math.abs(sph.targetTheta - sph.theta) <= 0.0005 &&
+              Math.abs(sph.targetPhi - sph.phi) <= 0.0005
+            ) {
+              sph.theta = sph.targetTheta;
+              sph.phi = sph.targetPhi;
+            }
+          }
+          camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
+          camera.position.y = sph.radius * Math.cos(sph.phi);
+          camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
+          camera.lookAt(0, 0, 0);
+        } else if (needsRenderRef.current) {
+          sph.theta = sph.targetTheta;
+          sph.phi = sph.targetPhi;
+          camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
+          camera.position.y = sph.radius * Math.cos(sph.phi);
+          camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
+          camera.lookAt(0, 0, 0);
+        }
+
+        // Update active layer rotation animation if present
+        const anim = activeAnimRef.current;
+        const isAnimating = Boolean(anim);
+        if (anim) {
+          const elapsed = Math.max(0, now - anim.startTime);
+          const effectiveDuration =
+            reducedMotionQuery?.matches || anim.durationMs <= 0
+              ? 0
+              : Math.max(40, anim.durationMs);
+          const rawT =
+            effectiveDuration === 0 ? 1 : Math.min(1, elapsed / effectiveDuration);
+          // Cubic ease out
+          const easedT = 1 - Math.pow(1 - rawT, 3);
+          const def = getMoveDefinition(anim.moveToken);
+          const targetAngle = def.quarterTurns * (Math.PI / 2);
+          pivotGroup.rotation.set(
+            def.axis === 'x' ? targetAngle * easedT : 0,
+            def.axis === 'y' ? targetAngle * easedT : 0,
+            def.axis === 'z' ? targetAngle * easedT : 0
+          );
+
+          if (rawT >= 1) {
+            const finishCb = anim.onFinish;
+            const postMoveCube = applyMove(anim.fromCube, anim.moveToken);
+            activeAnimRef.current = null;
+            // Immediately sync cubie meshes to postMoveCube before rendering this frame
+            // to prevent a 1-frame snapback flicker prior to React state commit
+            syncCubieMeshes(
+              postMoveCube,
+              getActiveLayerFilterFromToken(hintMoveTokenRef.current),
+              false
+            );
+            finishCb();
+          }
+        }
+
+        let didRender = false;
+        if (needsRenderRef.current || camMoving || isAnimating) {
+          needsRenderRef.current = false;
+          renderer.render(scene, camera);
+          didRender = true;
+        }
+
+        const stillCamMoving =
+          Math.abs(sph.targetTheta - sph.theta) > 0.0005 ||
+          Math.abs(sph.targetPhi - sph.phi) > 0.0005;
+        const stillAnimating = Boolean(activeAnimRef.current);
+
+        return {
+          didRender,
+          keepAlive: stillCamMoving || stillAnimating || needsRenderRef.current,
+        };
+      },
+    });
+
+    wakeSchedulerRef.current = () => frameScheduler.wake();
+    (
+      renderer.domElement as HTMLCanvasElement & {
+        __cubelabFrameStats?: () => { callbackCount: number; renderCount: number };
+      }
+    ).__cubelabFrameStats = () => frameScheduler.getStats();
+
+    recoveryControllerRef.current?.markSceneHealthy();
     syncCubieMeshes(cubeRef.current, getActiveLayerFilterFromToken(hintMoveTokenRef.current));
     rebuild3DArrow(activeAnimRef.current?.moveToken ?? hintMoveTokenRef.current);
 
@@ -778,7 +1127,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       cameraSpherical: cameraSphericalRef.current,
       isAnimating: () => Boolean(activeAnimRef.current),
       onRequestRender: () => {
-        needsRenderRef.current = true;
+        requestRenderWake();
       },
       onUserMove: (moveToken) => {
         onUserMoveRef.current(moveToken);
@@ -790,23 +1139,23 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     };
 
     const handleContextLost = (e: Event) => {
-      if (contextLossCountRef.current < 2) {
-        e.preventDefault();
-        contextLossCountRef.current += 1;
-      } else {
-        useFallback();
-      }
+      frameScheduler.setPaused(true);
+      recoveryControllerRef.current?.handleContextLost(e);
     };
 
     const handleContextRestored = () => {
-      setSceneKey((k) => k + 1);
+      recoveryControllerRef.current?.handleContextRestored();
     };
 
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
       const sph = cameraSphericalRef.current;
       sph.radius = Math.max(5.2, Math.min(11.0, sph.radius + e.deltaY * 0.003));
-      needsRenderRef.current = true;
+      requestRenderWake();
+    };
+
+    const handleVisibilityChange = () => {
+      frameScheduler.handleVisibilityChange();
     };
 
     const domElem = renderer.domElement;
@@ -818,6 +1167,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     domElem.addEventListener('pointermove', handlePointerMove);
     domElem.addEventListener('pointerup', handlePointerUp);
     domElem.addEventListener('pointercancel', handlePointerUp);
+    domElem.addEventListener('lostpointercapture', handlePointerUp);
     container.addEventListener('pointerdown', handlePointerDown);
     container.addEventListener('pointermove', handlePointerMove);
     container.addEventListener('pointerup', handlePointerUp);
@@ -825,92 +1175,21 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     window.addEventListener('pointercancel', handlePointerUp);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     domElem.addEventListener('wheel', handleWheel, { passive: false });
 
-    const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-
-    // Animation loop (on-demand rendering when idle to save mobile/laptop battery)
-    let reqId = 0;
-    const animate = (now: number) => {
-      reqId = requestAnimationFrame(animate);
-
-      if (document.hidden || container.clientWidth === 0 || container.clientHeight === 0) {
-        return;
-      }
-
-      // Update camera spherical orbit with smooth damping (or instant snap under reduced motion)
-      const sph = cameraSphericalRef.current;
-      const dTheta = sph.targetTheta - sph.theta;
-      const dPhi = sph.targetPhi - sph.phi;
-      const camMoving = Math.abs(dTheta) > 0.0005 || Math.abs(dPhi) > 0.0005;
-      if (camMoving) {
-        if (reducedMotionQuery?.matches) {
-          sph.theta = sph.targetTheta;
-          sph.phi = sph.targetPhi;
-        } else {
-          sph.theta += dTheta * 0.14;
-          sph.phi += dPhi * 0.14;
-        }
-        camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
-        camera.position.y = sph.radius * Math.cos(sph.phi);
-        camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
-        camera.lookAt(0, 0, 0);
-      } else if (needsRenderRef.current) {
-        sph.theta = sph.targetTheta;
-        sph.phi = sph.targetPhi;
-        camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
-        camera.position.y = sph.radius * Math.cos(sph.phi);
-        camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
-        camera.lookAt(0, 0, 0);
-      }
-
-      // Update active layer rotation animation if present
-      const anim = activeAnimRef.current;
-      const isAnimating = Boolean(anim);
-      if (anim) {
-        const elapsed = Math.max(0, now - anim.startTime);
-        const effectiveDuration =
-          reducedMotionQuery?.matches || anim.durationMs <= 0
-            ? 0
-            : Math.max(40, anim.durationMs);
-        const rawT =
-          effectiveDuration === 0 ? 1 : Math.min(1, elapsed / effectiveDuration);
-        // Cubic ease out
-        const easedT = 1 - Math.pow(1 - rawT, 3);
-        const def = getMoveDefinition(anim.moveToken);
-        const targetAngle = def.quarterTurns * (Math.PI / 2);
-        pivotGroup.rotation.set(
-          def.axis === 'x' ? targetAngle * easedT : 0,
-          def.axis === 'y' ? targetAngle * easedT : 0,
-          def.axis === 'z' ? targetAngle * easedT : 0
-        );
-
-        if (rawT >= 1) {
-          const finishCb = anim.onFinish;
-          const postMoveCube = applyMove(anim.fromCube, anim.moveToken);
-          activeAnimRef.current = null;
-          // Immediately sync cubie meshes to postMoveCube before rendering this frame
-          // to prevent a 1-frame snapback flicker prior to React state commit
-          syncCubieMeshes(
-            postMoveCube,
-            getActiveLayerFilterFromToken(hintMoveTokenRef.current),
-            false
-          );
-          finishCb();
-        }
-      }
-
-      if (needsRenderRef.current || camMoving || isAnimating) {
-        needsRenderRef.current = false;
-        renderer.render(scene, camera);
-      }
-    };
-    reqId = requestAnimationFrame(animate);
+    frameScheduler.wake();
 
     let lastW = width;
     let lastH = height;
     const resizeObserver = new ResizeObserver(() => {
-      if (!container) return;
+      if (
+        !container ||
+        stageStatusRef.current === 'context-lost' ||
+        stageStatusRef.current === 'fallback-2d'
+      ) {
+        return;
+      }
       const w = container.clientWidth;
       const h = container.clientHeight;
       if (w === 0 || h === 0 || (w === lastW && h === lastH)) return;
@@ -921,14 +1200,15 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       camera.updateProjectionMatrix();
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(w, h);
-      needsRenderRef.current = false;
-      renderer.render(scene, camera);
+      requestRenderWake();
     });
     resizeObserver.observe(container);
 
     return () => {
-      cancelAnimationFrame(reqId);
+      wakeSchedulerRef.current = null;
+      frameScheduler.dispose();
       resizeObserver.disconnect();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       domElem.removeEventListener('webglcontextlost', handleContextLost);
       domElem.removeEventListener('webglcontextrestored', handleContextRestored);
       domElem.removeEventListener('contextmenu', handleContextMenu);
@@ -936,6 +1216,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       domElem.removeEventListener('pointermove', handlePointerMove);
       domElem.removeEventListener('pointerup', handlePointerUp);
       domElem.removeEventListener('pointercancel', handlePointerUp);
+      domElem.removeEventListener('lostpointercapture', handlePointerUp);
       container.removeEventListener('pointerdown', handlePointerDown);
       container.removeEventListener('pointermove', handlePointerMove);
       container.removeEventListener('pointerup', handlePointerUp);
@@ -957,12 +1238,17 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
         rec.bodyMat.dispose();
         Object.values(rec.stickers).forEach((m) => m.dispose());
       });
-      renderer.forceContextLoss?.();
-      renderer.dispose();
+      recoveryControllerRef.current?.setIgnoringDisposalLoss(true);
+      try {
+        renderer.forceContextLoss?.();
+        renderer.dispose();
+      } finally {
+        recoveryControllerRef.current?.setIgnoringDisposalLoss(false);
+      }
       domElem.remove();
       sceneObjectsRef.current = null;
     };
-  }, [webGLUnavailable, onWebGLUnavailable, sceneKey]);
+  }, [isFallback2D, sceneKey]);
 
   // Trigger layer animation when activeAnimation prop changes
   useEffect(() => {
@@ -979,7 +1265,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
           getActiveLayerFilterFromToken(hintMoveTokenRef.current),
           false
         );
-        if (sceneObjectsRef.current) {
+        if (sceneObjectsRef.current && stageStatusRef.current === 'healthy') {
           const { renderer, scene, camera } = sceneObjectsRef.current;
           needsRenderRef.current = false;
           renderer.render(scene, camera);
@@ -1009,6 +1295,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
         startTime,
         started: Boolean(def),
       };
+      requestRenderWake();
 
       // Safety fallback timer so animations still complete on schedule when rAF is throttled
       const fallbackTimer = window.setTimeout(() => {
@@ -1022,7 +1309,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
           getActiveLayerFilterFromToken(hintMoveTokenRef.current),
           false
         );
-        if (sceneObjectsRef.current) {
+        if (sceneObjectsRef.current && stageStatusRef.current === 'healthy') {
           const { renderer, scene, camera } = sceneObjectsRef.current;
           renderer.render(scene, camera);
         }
@@ -1055,7 +1342,11 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
     setActivePresetIdx(idx);
     cameraSphericalRef.current.targetTheta = preset.theta;
     cameraSphericalRef.current.targetPhi = preset.phi;
-    needsRenderRef.current = true;
+    requestRenderWake();
+  };
+
+  const handleRetry3D = () => {
+    recoveryControllerRef.current?.retry3D();
   };
 
   const effectiveHintToken = activeAnimation?.moveToken ?? hintMoveToken;
@@ -1069,17 +1360,37 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
       })()
     : null;
 
-  if (webGLUnavailable) {
+  if (stageStatus === 'fallback-2d') {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-2 p-2 text-center">
-        <p className="text-xs text-slate-300" role="status">3D 暂不可用，已切换为可操作的 2D 展开图。</p>
+      <div
+        className="h-full flex flex-col items-center justify-center gap-2.5 p-3 text-center"
+        data-testid="webgl-fallback-container"
+        data-webgl-status={stageStatus}
+      >
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <p className="text-xs text-slate-300" role="status">
+            3D 暂不可用，已切换为可操作的 2D 展开图。
+          </p>
+          <button
+            type="button"
+            onClick={handleRetry3D}
+            data-testid="btn-retry-webgl"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 text-xs font-semibold text-cyan-200 transition-colors cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>重试 3D</span>
+          </button>
+        </div>
         {fallback}
       </div>
     );
   }
 
   return (
-    <div className="relative w-full h-full flex flex-col select-none overflow-hidden bg-radial from-[#131d31] via-[#0b111e] to-[#070a12]">
+    <div
+      className="relative w-full h-full flex flex-col select-none overflow-hidden bg-radial from-[#131d31] via-[#0b111e] to-[#070a12]"
+      data-webgl-status={stageStatus}
+    >
       {/* Top Overlay: Mode Status, Camera View Presets & Active Move HUD */}
       <div className="absolute top-3 left-3 right-3 z-10 flex flex-col gap-2 pointer-events-none">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1147,12 +1458,39 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
         </div>
       </div>
 
-      {/* Three.js Canvas Mount */}
+      {/* Three.js Canvas Mount (kept in DOM during context-lost so webglcontextrestored can fire) */}
       <div
         ref={mountRef}
-        className="w-full h-full flex-1 cursor-grab active:cursor-grabbing touch-none"
+        className={
+          stageStatus === 'context-lost'
+            ? 'sr-only'
+            : 'w-full h-full flex-1 cursor-grab active:cursor-grabbing touch-none'
+        }
         data-testid="cube-3d-canvas"
       />
+
+      {stageStatus === 'context-lost' && (
+        <div
+          className="relative z-20 flex-1 flex flex-col items-center justify-center gap-2.5 p-3 text-center"
+          data-testid="webgl-fallback-container"
+        >
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <p className="text-xs text-slate-300" role="status">
+              检测到 3D 渲染上下文丢失，正在等待恢复（期间可直接使用 2D 展开图操作）…
+            </p>
+            <button
+              type="button"
+              onClick={handleRetry3D}
+              data-testid="btn-retry-webgl"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 text-xs font-semibold text-cyan-200 transition-colors cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>重试 3D</span>
+            </button>
+          </div>
+          {fallback}
+        </div>
+      )}
 
       {/* Bottom-Left Orientation & Interaction Legend */}
       <div className="absolute bottom-3 left-3 z-10 hidden md:flex flex-col gap-1.5 pointer-events-none">
