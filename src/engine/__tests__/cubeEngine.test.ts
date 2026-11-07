@@ -25,16 +25,29 @@ import {
 } from '../../data/curriculum';
 import {
   MAX_SOLVE_RECORDS,
+  PLAYBACK_SPEEDS,
   SolveRecord,
   computeAo5,
   formatTimeMs,
+  getLastStorageSaveError,
+  isValidPlaybackSpeed,
+  isValidSolveRecord,
   loadCompletedLessons,
   loadSettings,
   loadSolveRecords,
   loadSolveStats,
+  saveCompletedLessons,
+  saveSettings,
   saveSolveRecords,
+  saveSolveRecordsWithStatus,
 } from '../../utils/storage';
-import { createStagePointerHandlers } from '../../components/Cube3DStage';
+import {
+  createOnDemandFrameScheduler,
+  createStagePointerHandlers,
+  createWebGLRecoveryController,
+} from '../../components/Cube3DStage';
+import { NOTATION_ITEMS } from '../../components/NotationGuideModal';
+import { isInteractiveOrEditableTarget } from '../../App';
 import {
   formatCubeCommentaryForSpeech,
   narrationEngine,
@@ -958,5 +971,730 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     // Finger 1 cancels/releases -> clears active pointer
     handlers.handlePointerUp(makePointerEvent('pointercancel', 10, sx, sy - 60));
     expect(handlers.getActivePointerId()).toBeNull();
+  });
+
+  it('RC-04: handles multi-window rotation (120 solves), legacy storage migration, and localStorage quota failures on 1st or 2nd write without losing PB or totalSolves', () => {
+    const store: Record<string, string> = {};
+    let failMode: 'none' | 'first-write' | 'second-write-with-rollback' | 'second-write-rollback-blocked' =
+      'none';
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => {
+          if (failMode === 'first-write' && k === 'cubelab_solve_records_v1') {
+            throw new Error('QuotaExceededError: first write failed');
+          }
+          if (failMode === 'second-write-with-rollback' && k === 'cubelab_solve_stats_v1') {
+            throw new Error('QuotaExceededError: second write failed');
+          }
+          if (failMode === 'second-write-rollback-blocked') {
+            if (k === 'cubelab_solve_stats_v1') {
+              throw new Error('QuotaExceededError: second write failed');
+            }
+            // Allow first write to cubelab_solve_records_v1, but block rollback write
+            if (k === 'cubelab_solve_records_v1' && store['__first_write_done'] === '1') {
+              throw new Error('QuotaExceededError: rollback write also failed');
+            }
+            if (k === 'cubelab_solve_records_v1') {
+              store['__first_write_done'] = '1';
+            }
+          }
+          store[k] = v;
+        },
+        removeItem: (k: string) => {
+          delete store[k];
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      // 1. Legacy migration: 50 records in cubelab_solve_records_v1 with no cubelab_solve_stats_v1
+      const legacy50: SolveRecord[] = Array.from({ length: 50 }, (_, idx) => ({
+        id: `legacy_${50 - idx}`,
+        timeMs: idx === 49 ? 1200 : 9000, // legacy_1 has 1200ms PB
+        scramble: 'R U',
+        createdAt: '10:00:00',
+        moveCount: 18,
+      }));
+      store['cubelab_solve_records_v1'] = JSON.stringify(legacy50);
+      delete store['cubelab_solve_stats_v1'];
+
+      expect(loadSolveRecords()).toHaveLength(50);
+      expect(loadSolveStats()).toEqual({ totalSolves: 50, bestTimeMs: 1200 });
+
+      // Legacy stats format without recentIds / recentEntries
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        archivedCount: 10,
+        archivedBestTimeMs: 950,
+      });
+      expect(loadSolveStats()).toEqual({ totalSolves: 60, bestTimeMs: 950 });
+
+      // Clear and test 120-solve multi-window rotation (49 -> 50 -> 51 -> 120)
+      saveSolveRecords([]);
+      let windowRecords: SolveRecord[] = [];
+      for (let i = 1; i <= 120; i++) {
+        const rec: SolveRecord = {
+          id: `rot_${i}`,
+          timeMs: i === 3 ? 750 : i === 74 ? 550 : 5000 + i,
+          ...(i === 74 ? { penalty: '+2' as const } : {}),
+          scramble: "R U R' U'",
+          createdAt: '11:22:33',
+          moveCount: 20,
+        };
+        windowRecords = saveSolveRecords([rec, ...windowRecords]);
+        if (i === 49) {
+          expect(windowRecords).toHaveLength(49);
+          expect(loadSolveStats()).toEqual({ totalSolves: 49, bestTimeMs: 750 });
+        } else if (i === 50) {
+          expect(windowRecords).toHaveLength(50);
+          expect(loadSolveStats()).toEqual({ totalSolves: 50, bestTimeMs: 750 });
+        } else if (i === 51) {
+          expect(windowRecords).toHaveLength(50);
+          expect(loadSolveStats()).toEqual({ totalSolves: 51, bestTimeMs: 750 });
+        }
+      }
+      expect(windowRecords).toHaveLength(50);
+      expect(windowRecords[0].id).toBe('rot_120');
+      expect(windowRecords[49].id).toBe('rot_71');
+      expect(loadSolveStats()).toEqual({ totalSolves: 120, bestTimeMs: 750 });
+
+      // Calling saveSolveRecords twice with the 51-record array at solve #121 is idempotent
+      const rec121: SolveRecord = {
+        id: 'rot_121',
+        timeMs: 6000,
+        scramble: 'F U R',
+        createdAt: '11:23:00',
+        moveCount: 19,
+      };
+      const payload121 = [rec121, ...windowRecords];
+      windowRecords = saveSolveRecords(payload121);
+      expect(loadSolveStats()).toEqual({ totalSolves: 121, bestTimeMs: 750 });
+      saveSolveRecords(payload121);
+      expect(loadSolveStats()).toEqual({ totalSolves: 121, bestTimeMs: 750 });
+
+      // 2. Quota failure on 1st setItem (SOLVE_RECORDS)
+      const rec122: SolveRecord = {
+        id: 'rot_122',
+        timeMs: 600,
+        scramble: 'R U2',
+        createdAt: '11:24:00',
+        moveCount: 16,
+      };
+      failMode = 'first-write';
+      const firstFailRes = saveSolveRecordsWithStatus([rec122, ...windowRecords]);
+      expect(firstFailRes.ok).toBe(false);
+      expect(firstFailRes.error).toContain('未保存');
+      expect(getLastStorageSaveError()).toContain('未保存');
+      failMode = 'none';
+      // Reloading after 1st write failure keeps consistent state (121 solves, 750ms PB)
+      expect(loadSolveRecords()[0].id).toBe('rot_121');
+      expect(loadSolveStats()).toEqual({ totalSolves: 121, bestTimeMs: 750 });
+
+      // 3. Quota failure on 2nd setItem (SOLVE_STATS) when rollback of SOLVE_RECORDS succeeds
+      failMode = 'second-write-with-rollback';
+      const secondFailRes = saveSolveRecordsWithStatus([rec122, ...windowRecords]);
+      expect(secondFailRes.ok).toBe(false);
+      expect(secondFailRes.error).toContain('未保存');
+      failMode = 'none';
+      // Because SOLVE_RECORDS was rolled back to prevRecordsRaw, reload does not lose PB/count or desync
+      expect(loadSolveRecords()[0].id).toBe('rot_121');
+      expect(loadSolveStats()).toEqual({ totalSolves: 121, bestTimeMs: 750 });
+
+      // Retrying save after quota clears succeeds without double-counting
+      const retrySuccess = saveSolveRecordsWithStatus([rec122, ...windowRecords]);
+      expect(retrySuccess.ok).toBe(true);
+      expect(retrySuccess.error).toBeNull();
+      windowRecords = retrySuccess.records;
+      expect(loadSolveStats()).toEqual({ totalSolves: 122, bestTimeMs: 600 });
+
+      // 4. Quota failure on 2nd setItem when rollback write ALSO throws (worst-case partial write)
+      // At this point windowRecords has rot_122..rot_73 (where rot_122 has 600ms, archived PB is 750ms from rot_3).
+      // Put +2 penalty on rot_122 so current PB is 750ms (from archived rot_3), then test that a partial write
+      // where rot_73 gets evicted into recentEntries forward-shift recovery preserves archivedCount + 1 (total 123) and PB (750ms)!
+      windowRecords = saveSolveRecords(
+        windowRecords.map((r) => (r.id === 'rot_122' ? { ...r, penalty: '+2' as const } : r))
+      );
+      expect(loadSolveStats()).toEqual({ totalSolves: 122, bestTimeMs: 750 });
+
+      const rec123: SolveRecord = {
+        id: 'rot_123',
+        timeMs: 4500,
+        scramble: 'U R',
+        createdAt: '11:25:00',
+        moveCount: 15,
+      };
+      delete store['__first_write_done'];
+      failMode = 'second-write-rollback-blocked';
+      const partialFailRes = saveSolveRecordsWithStatus([rec123, ...windowRecords]);
+      expect(partialFailRes.ok).toBe(false);
+      expect(partialFailRes.error).toContain('未保存');
+      failMode = 'none';
+
+      // Now SOLVE_RECORDS in localStorage has rot_123..rot_74 (rot_73 was evicted from SOLVE_RECORDS!)
+      // while SOLVE_STATS still has the state from solve #122.
+      // Reloading must recover the forward-shifted window via recentEntries (totalSolves = 123, bestTimeMs = 750)!
+      const recoveredRecords = loadSolveRecords();
+      const recoveredStats = loadSolveStats();
+      expect(recoveredRecords[0].id).toBe('rot_123');
+      expect(recoveredStats).toEqual({
+        totalSolves: 123,
+        bestTimeMs: 750,
+      });
+
+      // Retrying saveSolveRecordsWithStatus with the exact same 51-record payload after partial write is idempotent
+      const retryAfterPartial = saveSolveRecordsWithStatus([rec123, ...windowRecords]);
+      expect(retryAfterPartial.ok).toBe(true);
+      expect(retryAfterPartial.stats).toEqual({
+        totalSolves: 123,
+        bestTimeMs: 750,
+      });
+      windowRecords = retryAfterPartial.records;
+
+      // 5. Failed 50->51 window transition followed by in-memory penalty toggle
+      // Clear the +2 penalty on the oldest record in the current window (rot_74 at index 49, timeMs = 550)
+      windowRecords = saveSolveRecords(
+        windowRecords.map((r) => (r.id === 'rot_74' ? { ...r, penalty: 'none' as const } : r))
+      );
+      expect(loadSolveStats()).toEqual({ totalSolves: 123, bestTimeMs: 550 });
+
+      const rec124: SolveRecord = {
+        id: 'rot_124',
+        timeMs: 4200,
+        scramble: 'R U',
+        createdAt: '11:26:00',
+        moveCount: 18,
+      };
+      failMode = 'first-write';
+      const failed124 = saveSolveRecordsWithStatus([rec124, ...windowRecords]);
+      expect(failed124.ok).toBe(false);
+      // In-memory state in App.tsx holds failed124.records (rot_124..rot_75, length 50), while localStorage still holds rot_123..rot_74!
+      expect(failed124.records).toHaveLength(50);
+      expect(failed124.records[0].id).toBe('rot_124');
+      expect(failed124.records[49].id).toBe('rot_75');
+      failMode = 'none';
+
+      // User toggles +2 penalty on rot_124 using the 50-record in-memory array after quota clears:
+      // Must merge with localStorage prevStored so rot_74 (with 550ms PB!) is archived rather than lost!
+      const afterPenaltyOn124 = saveSolveRecordsWithStatus(
+        failed124.records.map((r) => (r.id === 'rot_124' ? { ...r, penalty: '+2' as const } : r))
+      );
+      expect(afterPenaltyOn124.ok).toBe(true);
+      expect(afterPenaltyOn124.stats).toEqual({
+        totalSolves: 124,
+        bestTimeMs: 550,
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 124,
+        bestTimeMs: 550,
+      });
+
+      // Also verify saveSettings and saveCompletedLessons error tracking & recovery
+      const origSetItem = globalThis.localStorage.setItem;
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: {
+          ...globalThis.localStorage,
+          setItem: () => {
+            throw new Error('QuotaExceededError: settings/lessons blocked');
+          },
+        },
+        configurable: true,
+      });
+      expect(
+        saveSettings({
+          soundEnabled: true,
+          narrationEnabled: true,
+          focusMode: true,
+          show3DArrows: true,
+          show2DNet: true,
+          playbackSpeed: 1,
+        })
+      ).toBe(false);
+      expect(getLastStorageSaveError()).toContain('未保存：设置写入失败');
+      expect(saveCompletedLessons(['basics-structure'])).toBe(false);
+      expect(getLastStorageSaveError()).toContain('未保存：课程进度写入失败');
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: {
+          ...globalThis.localStorage,
+          setItem: origSetItem,
+        },
+        configurable: true,
+      });
+      expect(
+        saveSettings({
+          soundEnabled: true,
+          narrationEnabled: true,
+          focusMode: true,
+          show3DArrows: true,
+          show2DNet: true,
+          playbackSpeed: 1,
+        })
+      ).toBe(true);
+      expect(getLastStorageSaveError()).toBeNull();
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: origStorage,
+        configurable: true,
+      });
+    }
+  });
+
+  it('RC-05: enforces shared PLAYBACK_SPEEDS enum and strict SolveRecord schema/field validation', () => {
+    expect(PLAYBACK_SPEEDS).toEqual([0.5, 1, 1.5, 2]);
+    for (const spd of PLAYBACK_SPEEDS) {
+      expect(isValidPlaybackSpeed(spd)).toBe(true);
+    }
+    for (const invalidSpd of [0, 0.75, 1.25, 3, -1, Number.NaN, Number.POSITIVE_INFINITY, '1']) {
+      expect(isValidPlaybackSpeed(invalidSpd)).toBe(false);
+    }
+
+    const store: Record<string, string> = {};
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => {
+          store[k] = v;
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      // Unsupported speed 0.75 in localStorage falls back to 1
+      store['cubelab_settings_v1'] = JSON.stringify({ playbackSpeed: 0.75 });
+      expect(loadSettings().playbackSpeed).toBe(1);
+
+      store['cubelab_settings_v1'] = JSON.stringify({ playbackSpeed: 1.5 });
+      expect(loadSettings().playbackSpeed).toBe(1.5);
+
+      const baseValid: SolveRecord = {
+        id: 'solve_valid_1',
+        timeMs: 8500,
+        scramble: "R U R' U'",
+        createdAt: '14:30:05',
+        moveCount: 22,
+      };
+      expect(isValidSolveRecord(baseValid)).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '下午02:30:05' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '晚上09:15:30' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '凌晨01:05:00' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '02:30:05 PM' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-11-07T10:12:27Z' })).toBe(true);
+      expect(isValidSolveRecord({ ...baseValid, version: 1 })).toBe(true);
+
+      // Invalid records rejected
+      expect(isValidSolveRecord({ ...baseValid, id: '' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, id: 'x'.repeat(129) })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, scramble: 'R '.repeat(300) })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, scramble: 'R INVALID_MOVE U' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '99:99:99' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: 'not-a-valid-date' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, createdAt: '2026-13-45' })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, timeMs: 0 })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, moveCount: -1 })).toBe(false);
+      expect(isValidSolveRecord({ ...baseValid, version: 99 })).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: origStorage,
+        configurable: true,
+      });
+    }
+  });
+
+  it('RC-06: isInteractiveOrEditableTarget guards buttons, links, form controls, ARIA roles, dialogs, and nested contenteditable children', () => {
+    expect(isInteractiveOrEditableTarget(null)).toBe(false);
+
+    // Non-interactive stage / canvas / body targets return false
+    expect(isInteractiveOrEditableTarget({ tagName: 'MAIN' } as unknown as EventTarget)).toBe(false);
+    expect(isInteractiveOrEditableTarget({ tagName: 'CANVAS' } as unknown as EventTarget)).toBe(false);
+    expect(isInteractiveOrEditableTarget({ tagName: 'DIV' } as unknown as EventTarget)).toBe(false);
+
+    // Direct interactive tags return true
+    for (const tag of ['BUTTON', 'A', 'SELECT', 'INPUT', 'TEXTAREA', 'SUMMARY', 'OPTION', 'DIALOG']) {
+      expect(isInteractiveOrEditableTarget({ tagName: tag } as unknown as EventTarget)).toBe(true);
+    }
+
+    // ARIA interactive roles return true
+    for (const role of [
+      'button',
+      'link',
+      'tab',
+      'menuitem',
+      'switch',
+      'checkbox',
+      'radio',
+      'combobox',
+      'slider',
+      'dialog',
+    ]) {
+      const roleTarget = {
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'role' ? role : null),
+      };
+      expect(isInteractiveOrEditableTarget(roleTarget as unknown as EventTarget)).toBe(true);
+    }
+
+    // aria-modal="true" returns true
+    expect(
+      isInteractiveOrEditableTarget({
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'aria-modal' ? 'true' : null),
+      } as unknown as EventTarget)
+    ).toBe(true);
+
+    // Nested child inside a <button> or [contenteditable="true"] (including parentNode fallback) returns true
+    const nestedInButton = {
+      tagName: 'SPAN',
+      parentElement: {
+        tagName: 'BUTTON',
+      },
+    };
+    expect(isInteractiveOrEditableTarget(nestedInButton as unknown as EventTarget)).toBe(true);
+
+    const textNodeInButton = {
+      parentNode: {
+        tagName: 'BUTTON',
+      },
+    };
+    expect(isInteractiveOrEditableTarget(textNodeInButton as unknown as EventTarget)).toBe(true);
+
+    const nestedInContentEditable = {
+      tagName: 'SPAN',
+      parentElement: {
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'contenteditable' ? 'true' : null),
+      },
+    };
+    expect(isInteractiveOrEditableTarget(nestedInContentEditable as unknown as EventTarget)).toBe(
+      true
+    );
+
+    // contenteditable="false" does not block shortcuts
+    const nonEditableDiv = {
+      tagName: 'SPAN',
+      parentElement: {
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'contenteditable' ? 'false' : null),
+      },
+    };
+    expect(isInteractiveOrEditableTarget(nonEditableDiv as unknown as EventTarget)).toBe(false);
+  });
+
+  it('RC-07: NOTATION_ITEMS covers E, S, wide moves, and whole-cube rotations without duplicate typos, and 3D drag dispatches M/E/S matching engine directions', () => {
+    const tokensText = NOTATION_ITEMS.map((item) => item.token).join(' ');
+    expect(tokensText).toContain("E / E' / E2");
+    expect(tokensText).toContain("S / S' / S2");
+    expect(tokensText).toContain('r l u d f b');
+    expect(tokensText).toContain('Rw..Bw');
+    expect(tokensText).toContain('x / y / z');
+
+    for (const item of NOTATION_ITEMS) {
+      expect(item.desc).not.toContain('90° 90°');
+    }
+
+    // Verify all engine moves covered by NOTATION_ITEMS parse cleanly and match documented base directions
+    for (const tok of [
+      'R', "R'", 'R2',
+      'L', "L'", 'L2',
+      'U', "U'", 'U2',
+      'D', "D'", 'D2',
+      'F', "F'", 'F2',
+      'B', "B'", 'B2',
+      'M', "M'", 'M2',
+      'E', "E'", 'E2',
+      'S', "S'", 'S2',
+      'r', 'l', 'u', 'd', 'f', 'b',
+      'Rw', 'Lw', 'Uw', 'Dw', 'Fw', 'Bw',
+      'x', "x'", 'x2',
+      'y', "y'", 'y2',
+      'z', "z'", 'z2',
+    ]) {
+      expect(() => getMoveDefinition(tok)).not.toThrow();
+    }
+
+    // Verify M follows L, E follows D, S follows F in getMoveDefinition
+    expect(getMoveDefinition('M').quarterTurns).toBe(getMoveDefinition('L').quarterTurns);
+    expect(getMoveDefinition('E').quarterTurns).toBe(getMoveDefinition('D').quarterTurns);
+    expect(getMoveDefinition('S').quarterTurns).toBe(getMoveDefinition('F').quarterTurns);
+
+    // Verify 3D pointer drag on middle-layer stickers dispatches M, E, S matching L, D, F directions
+    const domElement = {
+      clientWidth: 600,
+      clientHeight: 600,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 600 }),
+    };
+    const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+    camera.position.set(4, 4, 5);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+
+    const rootGroup = new THREE.Group();
+    const addTestSticker = (pos: [number, number, number], faceDir: 'F' | 'U') => {
+      const g = new THREE.Group();
+      g.position.set(...pos);
+      g.userData = { cubieId: pos.join(','), pos };
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.8, 0.8),
+        new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
+      );
+      if (faceDir === 'F') {
+        mesh.position.set(0, 0, 0.472);
+      } else {
+        mesh.position.set(0, 0.472, 0);
+        mesh.rotation.set(-Math.PI / 2, 0, 0);
+      }
+      mesh.userData = { faceDir, cubieId: pos.join(',') };
+      g.add(mesh);
+      rootGroup.add(g);
+    };
+
+    // Front center (0, 0, 1) facing F (+Z): vertical drag tests M / M', horizontal drag tests E / E'
+    addTestSticker([0, 0, 1], 'F');
+    // Top center (0, 1, 0) facing U (+Y): +X/-X drag tests S / S'
+    addTestSticker([0, 1, 0], 'U');
+    rootGroup.updateMatrixWorld(true);
+
+    const dispatched: string[] = [];
+    const handlers = createStagePointerHandlers({
+      domElement,
+      camera,
+      rootGroup,
+      cameraSpherical: { radius: 7.4, theta: 0.75, phi: 1.0, targetTheta: 0.75, targetPhi: 1.0 },
+      isAnimating: () => false,
+      onRequestRender: () => {},
+      onUserMove: (tok) => dispatched.push(tok),
+    });
+
+    const projectToScreen = (worldPt: THREE.Vector3) => {
+      const p = worldPt.clone().project(camera);
+      return { x: ((p.x + 1) * 0.5) * 600, y: ((-p.y + 1) * 0.5) * 600 };
+    };
+
+    // 1. Drag down (-Y) on Front center (0, 0, 1.472) -> M (follows L downward)
+    const f0 = projectToScreen(new THREE.Vector3(0, 0, 1.472));
+    const fDown = projectToScreen(new THREE.Vector3(0, -0.6, 1.472));
+    handlers.handlePointerDown({ pointerId: 1, button: 0, clientX: f0.x, clientY: f0.y } as PointerEvent);
+    handlers.handlePointerMove({ pointerId: 1, button: 0, buttons: 1, clientX: fDown.x, clientY: fDown.y } as PointerEvent);
+    handlers.handlePointerUp({ pointerId: 1, button: 0, buttons: 0, clientX: fDown.x, clientY: fDown.y } as PointerEvent);
+
+    // 2. Drag right (+X) on Front center (0, 0, 1.472) -> E (follows D rightward)
+    const fRight = projectToScreen(new THREE.Vector3(0.6, 0, 1.472));
+    handlers.handlePointerDown({ pointerId: 2, button: 0, clientX: f0.x, clientY: f0.y } as PointerEvent);
+    handlers.handlePointerMove({ pointerId: 2, button: 0, buttons: 1, clientX: fRight.x, clientY: fRight.y } as PointerEvent);
+    handlers.handlePointerUp({ pointerId: 2, button: 0, buttons: 0, clientX: fRight.x, clientY: fRight.y } as PointerEvent);
+
+    // 3. Drag right (+X) on Top center (0, 1.472, 0) -> S (follows F clockwise)
+    const u0 = projectToScreen(new THREE.Vector3(0, 1.472, 0));
+    const uRight = projectToScreen(new THREE.Vector3(0.6, 1.472, 0));
+    handlers.handlePointerDown({ pointerId: 3, button: 0, clientX: u0.x, clientY: u0.y } as PointerEvent);
+    handlers.handlePointerMove({ pointerId: 3, button: 0, buttons: 1, clientX: uRight.x, clientY: uRight.y } as PointerEvent);
+    handlers.handlePointerUp({ pointerId: 3, button: 0, buttons: 0, clientX: uRight.x, clientY: uRight.y } as PointerEvent);
+
+    expect(dispatched).toEqual(['M', 'E', 'S']);
+  });
+
+  it('RC-08: createWebGLRecoveryController manages context loss, stability window, restore timeout, 2D fallback, manual retry, and disposal suppression', () => {
+    const statuses: string[] = [];
+    let rebuildCount = 0;
+
+    let nextTimerId = 1;
+    const timers = new Map<number, { cb: () => void; ms: number }>();
+
+    const controller = createWebGLRecoveryController({
+      maxConsecutiveLosses: 2,
+      stabilityWindowMs: 1500,
+      restoreTimeoutMs: 4000,
+      onStatusChange: (s) => statuses.push(s),
+      onRebuildScene: () => {
+        rebuildCount += 1;
+      },
+      setTimer: (cb, ms) => {
+        const id = nextTimerId++;
+        timers.set(id, { cb, ms });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimer: (id) => {
+        timers.delete(id as unknown as number);
+      },
+    });
+
+    expect(controller.getStatus()).toBe('healthy');
+    controller.markSceneHealthy();
+
+    // 1. Single active context loss + restore + stability window
+    let prevented = false;
+    controller.handleContextLost({
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+    expect(controller.getStatus()).toBe('context-lost');
+    expect(controller.getConsecutiveLosses()).toBe(1);
+
+    controller.handleContextRestored();
+    expect(controller.getStatus()).toBe('rebuilding');
+    expect(rebuildCount).toBe(1);
+
+    controller.markSceneHealthy();
+    expect(controller.getStatus()).toBe('healthy');
+    // Before stability window elapses, consecutiveLosses is still 1
+    expect(controller.getConsecutiveLosses()).toBe(1);
+
+    // Advance past stabilityWindowMs (1500ms) -> resets consecutiveLosses to 0!
+    for (const [id, t] of [...timers.entries()]) {
+      if (t.ms === 1500) {
+        timers.delete(id);
+        t.cb();
+      }
+    }
+    expect(controller.getConsecutiveLosses()).toBe(0);
+
+    // 2. Three rapid consecutive losses (without completing stability window) -> 'fallback-2d'
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+    expect(controller.getConsecutiveLosses()).toBe(1);
+    controller.handleContextRestored();
+    controller.markSceneHealthy(); // did NOT flush 1500ms stability timer
+
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+    expect(controller.getConsecutiveLosses()).toBe(2);
+    controller.handleContextRestored();
+    controller.markSceneHealthy(); // did NOT flush 1500ms stability timer
+
+    let preventedOnThird = false;
+    controller.handleContextLost({
+      preventDefault: () => {
+        preventedOnThird = true;
+      },
+    });
+    expect(preventedOnThird).toBe(false);
+    expect(controller.getStatus()).toBe('fallback-2d');
+
+    // 3. Manual retry3D() resets budget and transitions to 'rebuilding'
+    controller.retry3D();
+    expect(controller.getStatus()).toBe('rebuilding');
+    expect(controller.getConsecutiveLosses()).toBe(0);
+    controller.markSceneHealthy();
+    expect(controller.getStatus()).toBe('healthy');
+
+    // 4. Context loss that times out waiting for webglcontextrestored -> 'fallback-2d'
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+    for (const [id, t] of [...timers.entries()]) {
+      if (t.ms === 4000) {
+        timers.delete(id);
+        t.cb();
+      }
+    }
+    expect(controller.getStatus()).toBe('fallback-2d');
+
+    // 5. Disposal loss suppression: context loss during unmount/dispose is ignored
+    controller.retry3D();
+    controller.markSceneHealthy();
+    controller.setIgnoringDisposalLoss(true);
+    let preventedDuringDispose = false;
+    controller.handleContextLost({
+      preventDefault: () => {
+        preventedDuringDispose = true;
+      },
+    });
+    expect(preventedDuringDispose).toBe(false);
+    expect(controller.getStatus()).toBe('healthy');
+    controller.setIgnoringDisposalLoss(false);
+
+    // 6. StrictMode / remount lifecycle: dispose() followed by revive() keeps controller operational
+    controller.dispose();
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('healthy');
+    controller.revive();
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+  });
+
+  it('RC-09: createOnDemandFrameScheduler achieves 0 idle/hidden rAF callbacks and wakes on demand', () => {
+    let nextRafId = 1;
+    const rafQueue = new Map<number, (now: number) => void>();
+    let hidden = false;
+    let shouldKeepAlive = false;
+
+    const scheduler = createOnDemandFrameScheduler({
+      onStepFrame: () => ({ didRender: true, keepAlive: shouldKeepAlive }),
+      requestFrame: (cb) => {
+        const id = nextRafId++;
+        rafQueue.set(id, cb);
+        return id;
+      },
+      cancelFrame: (id) => {
+        rafQueue.delete(id);
+      },
+      isHidden: () => hidden,
+    });
+
+    const flushNextAnimationFrame = (timestamp = 16) => {
+      const entries = [...rafQueue.entries()];
+      rafQueue.clear();
+      for (const [, cb] of entries) {
+        cb(timestamp);
+      }
+    };
+
+    // 1. Initially idle: 0 callbacks scheduled or run
+    expect(scheduler.isScheduled()).toBe(false);
+    expect(rafQueue.size).toBe(0);
+    expect(scheduler.getStats()).toEqual({ callbackCount: 0, renderCount: 0 });
+
+    // 2. Multiple synchronous wake() calls coalesce into 1 rAF
+    scheduler.wake();
+    scheduler.wake();
+    scheduler.wake();
+    expect(scheduler.isScheduled()).toBe(true);
+    expect(rafQueue.size).toBe(1);
+
+    // Single render frame (shouldKeepAlive = false) -> renders once and stops completely
+    flushNextAnimationFrame(16);
+    expect(scheduler.getStats()).toEqual({ callbackCount: 1, renderCount: 1 });
+    expect(scheduler.isScheduled()).toBe(false);
+    expect(rafQueue.size).toBe(0);
+
+    // Idle period: flushing frames when nothing requested produces 0 callbacks and 0 renders
+    flushNextAnimationFrame(32);
+    flushNextAnimationFrame(48);
+    expect(scheduler.getStats()).toEqual({ callbackCount: 1, renderCount: 1 });
+
+    // 3. Continuous animation / camera damping (shouldKeepAlive = true for 3 frames, then settles)
+    let remainingActiveFrames = 3;
+    shouldKeepAlive = true;
+    scheduler.wake();
+    while (remainingActiveFrames > 0) {
+      remainingActiveFrames -= 1;
+      if (remainingActiveFrames === 0) {
+        shouldKeepAlive = false;
+      }
+      flushNextAnimationFrame(64);
+    }
+    expect(scheduler.getStats()).toEqual({ callbackCount: 4, renderCount: 4 });
+    expect(scheduler.isScheduled()).toBe(false);
+    expect(rafQueue.size).toBe(0);
+
+    // 4. Hidden tab: wake() does not schedule rAF while document is hidden
+    hidden = true;
+    scheduler.wake();
+    expect(scheduler.isScheduled()).toBe(false);
+    expect(rafQueue.size).toBe(0);
+    flushNextAnimationFrame(80);
+    expect(scheduler.getStats()).toEqual({ callbackCount: 4, renderCount: 4 });
+
+    // 5. Tab becomes visible again -> handleVisibilityChange wakes and renders 1 frame
+    hidden = false;
+    scheduler.handleVisibilityChange();
+    expect(scheduler.isScheduled()).toBe(true);
+    flushNextAnimationFrame(96);
+    expect(scheduler.getStats()).toEqual({ callbackCount: 5, renderCount: 5 });
+    expect(scheduler.isScheduled()).toBe(false);
   });
 });
