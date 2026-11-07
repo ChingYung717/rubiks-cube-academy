@@ -75,6 +75,12 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
   ) => {
     if (disposed || ignoringDisposalLoss || status === 'fallback-2d') return;
     if (generation !== undefined && generation !== activeGeneration) return;
+    if (status === 'context-lost') {
+      if (consecutiveLosses <= maxConsecutiveLosses) {
+        event?.preventDefault?.();
+      }
+      return;
+    }
     clearRestoreTimer();
     clearStabilityTimer();
     consecutiveLosses += 1;

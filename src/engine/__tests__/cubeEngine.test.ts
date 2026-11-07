@@ -1289,14 +1289,32 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 2600,
       });
 
-      // Out-of-band corruption in SOLVE_STATS without matching recentIds (e.g. recentEntries: [] and no recentIds) falls back to visible window
+      // If recentEntries[0] is corrupted and a trailing entry exists while recentIds matches,
+      // shiftK must NOT falsely trigger or double-archive the trailing entry
+      store['cubelab_solve_stats_v1'] = JSON.stringify({
+        ...parsedBackup,
+        recentEntries: [
+          { id: 'bad', timeMs: 0, effectiveTimeMs: 0, countable: true },
+          ...parsedBackup.recentEntries.slice(1),
+          { id: 'bogus', timeMs: 100, effectiveTimeMs: 100, countable: true },
+        ],
+      });
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 127,
+        bestTimeMs: 550,
+      });
+
+      // Out-of-band corruption in SOLVE_STATS without matching recentIds (including index-0 invalid entry followed by valid tail) falls back to visible window
       store['cubelab_solve_stats_v1'] = JSON.stringify({
         version: 1,
         totalSolves: 999,
-        bestTimeMs: 0,
+        bestTimeMs: 100,
         archivedCount: 949,
-        archivedBestTimeMs: 0,
-        recentEntries: [{ id: 'bad', timeMs: 0, effectiveTimeMs: 0, countable: true }],
+        archivedBestTimeMs: 100,
+        recentEntries: [
+          { id: 'bad', timeMs: 0, effectiveTimeMs: 0, countable: true },
+          ...parsedBackup.recentEntries.slice(1),
+        ],
       });
       expect(loadSolveStats()).toEqual({
         totalSolves: 50,
@@ -1814,10 +1832,24 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(controller.getStatus()).toBe('healthy');
 
     // If a newly created renderer is already context-lost before listeners attach (isContextLost: true),
-    // markSceneHealthy({ isContextLost: true }) does NOT mark it healthy and instead triggers context loss
+    // markSceneHealthy({ isContextLost: true }) does NOT mark it healthy and instead triggers context loss;
+    // when the browser's queued DOM webglcontextlost event subsequently fires for the same genC,
+    // it still calls preventDefault() without double-incrementing consecutiveLosses
     controller.retry3D();
     const genC = controller.getGeneration();
     controller.markSceneHealthy({ isContextLost: true, generation: genC });
+    expect(controller.getStatus()).toBe('context-lost');
+    expect(controller.getConsecutiveLosses()).toBe(1);
+    let preventedOnQueuedEvent = false;
+    controller.handleContextLost(
+      {
+        preventDefault: () => {
+          preventedOnQueuedEvent = true;
+        },
+      },
+      genC
+    );
+    expect(preventedOnQueuedEvent).toBe(true);
     expect(controller.getStatus()).toBe('context-lost');
     expect(controller.getConsecutiveLosses()).toBe(1);
   });
