@@ -1202,6 +1202,83 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
         bestTimeMs: 550,
       });
 
+      // 6. Two consecutive partial writes (shiftK = 2) followed by idempotent retry of the 51-record payload
+      windowRecords = afterPenaltyOn124.records;
+      const rec125: SolveRecord = {
+        id: 'rot_125',
+        timeMs: 4100,
+        scramble: 'U2',
+        createdAt: '11:27:00',
+        moveCount: 14,
+      };
+      const rec126: SolveRecord = {
+        id: 'rot_126',
+        timeMs: 4050,
+        scramble: 'R2',
+        createdAt: '11:28:00',
+        moveCount: 16,
+      };
+      delete store['__first_write_done'];
+      failMode = 'second-write-rollback-blocked';
+      const partial125 = saveSolveRecordsWithStatus([rec125, ...windowRecords]);
+      expect(partial125.ok).toBe(false);
+      delete store['__first_write_done'];
+      const partial126 = saveSolveRecordsWithStatus([rec126, ...partial125.records]);
+      expect(partial126.ok).toBe(false);
+      failMode = 'none';
+
+      // SOLVE_RECORDS on disk is 2 steps ahead of SOLVE_STATS (rot_126..rot_77 vs rot_124..rot_75)
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 126,
+        bestTimeMs: 550,
+      });
+      // Retrying the last 51-record payload ([rec126, ...partial125.records]) is idempotent and heals SOLVE_STATS
+      const healed126 = saveSolveRecordsWithStatus([rec126, ...partial125.records]);
+      expect(healed126.ok).toBe(true);
+      expect(healed126.stats).toEqual({
+        totalSolves: 126,
+        bestTimeMs: 550,
+      });
+
+      // 7. 49 -> 50 -> 51 partial writes across the initial 50-record window boundary
+      saveSolveRecords([]);
+      let subWindow: SolveRecord[] = [];
+      for (let i = 1; i <= 49; i++) {
+        subWindow = saveSolveRecords([
+          {
+            id: `sub_${i}`,
+            timeMs: i === 1 ? 680 : 5000 + i,
+            scramble: 'R U',
+            createdAt: '11:30:00',
+            moveCount: 15,
+          },
+          ...subWindow,
+        ]);
+      }
+      expect(loadSolveStats()).toEqual({ totalSolves: 49, bestTimeMs: 680 });
+
+      delete store['__first_write_done'];
+      failMode = 'second-write-rollback-blocked';
+      const sub50Res = saveSolveRecordsWithStatus([
+        { id: 'sub_50', timeMs: 5100, scramble: 'F', createdAt: '11:31:00', moveCount: 15 },
+        ...subWindow,
+      ]);
+      expect(sub50Res.ok).toBe(false);
+      delete store['__first_write_done'];
+      const sub51Res = saveSolveRecordsWithStatus([
+        { id: 'sub_51', timeMs: 5200, scramble: 'B', createdAt: '11:32:00', moveCount: 15 },
+        ...sub50Res.records,
+      ]);
+      expect(sub51Res.ok).toBe(false);
+      failMode = 'none';
+
+      // Even though SOLVE_STATS on disk still had recentEntries of length 49 (sub_49..sub_1),
+      // loadSolveStats() reconciles the 2-step shift into the 50-record window and preserves sub_1's 680ms PB!
+      expect(loadSolveStats()).toEqual({
+        totalSolves: 51,
+        bestTimeMs: 680,
+      });
+
       // Also verify saveSettings and saveCompletedLessons error tracking & recovery
       const origSetItem = globalThis.localStorage.setItem;
       Object.defineProperty(globalThis, 'localStorage', {
@@ -1642,6 +1719,18 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(controller.getStatus()).toBe('healthy');
     controller.revive();
     controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+
+    // 7. Rapid synchronous loss -> restore -> loss before scene effect runs markSceneHealthy:
+    // markSceneHealthy must NOT overwrite 'context-lost' or 'fallback-2d' back to 'healthy'
+    controller.retry3D();
+    controller.markSceneHealthy();
+    controller.handleContextLost();
+    controller.handleContextRestored();
+    expect(controller.getStatus()).toBe('rebuilding');
+    controller.handleContextLost();
+    expect(controller.getStatus()).toBe('context-lost');
+    controller.markSceneHealthy();
     expect(controller.getStatus()).toBe('context-lost');
   });
 

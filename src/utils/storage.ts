@@ -308,9 +308,14 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
           ? rawBest
           : null;
 
-    if (recentEntries !== undefined && recentEntries.length === MAX_SOLVE_RECORDS) {
+    if (
+      recentEntries !== undefined &&
+      recentEntries.length > 0 &&
+      recentEntries.length <= MAX_SOLVE_RECORDS
+    ) {
       const exactMatch =
         recentRecords.length === MAX_SOLVE_RECORDS &&
+        recentEntries.length === MAX_SOLVE_RECORDS &&
         recentRecords.every(
           (r, idx) => r.id === recentEntries[idx].id && r.timeMs === recentEntries[idx].timeMs
         );
@@ -319,6 +324,8 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
         let shiftK = -1;
         if (recentRecords.length === MAX_SOLVE_RECORDS) {
           for (let k = 1; k < MAX_SOLVE_RECORDS; k++) {
+            const overlapLen = MAX_SOLVE_RECORDS - k;
+            if (overlapLen > recentEntries.length) continue;
             const overlapMatches = recentRecords
               .slice(k)
               .every(
@@ -348,7 +355,8 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
             effectiveTimeMs: getEffectiveSolveTimeMs(r),
             countable: r.moveCount > 0,
           }));
-          const reconciledSig = shiftedEntries.map((ev) => `${ev.id}:${ev.timeMs}`).join('|');
+          const shiftedSig = shiftedEntries.map((ev) => `${ev.id}:${ev.timeMs}`).join('|');
+          const reconciledSig = shiftedSig || lastEvictedSig;
           return {
             version: STORAGE_SCHEMA_VERSION,
             totalSolves: archivedCount + windowStats.countableSolves,
@@ -357,7 +365,7 @@ function readRawPersistedStats(recentRecords: SolveRecord[]): PersistedSolveStat
             archivedBestTimeMs,
             recentIds: reconciledIds,
             recentEntries: reconciledEntries,
-            lastEvictedSig: reconciledSig,
+            ...(reconciledSig !== undefined ? { lastEvictedSig: reconciledSig } : {}),
           };
         } else {
           return {
@@ -483,11 +491,14 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
     prevStored.every((p, idx) => isSameSolveIdentity(valid[idx], p));
 
   const isSameWindowUpdate = topMatchesPrevWindow && newlyEvicted.length === 0;
+  const prevEvictedParts =
+    prevStats.lastEvictedSig !== undefined ? prevStats.lastEvictedSig.split('|') : [];
+  const directEvictedParts = newlyEvicted.map((r) => `${r.id}:${r.timeMs}`);
   const isIdempotentRepeat =
     topMatchesPrevWindow &&
-    newlyEvicted.length > 0 &&
-    prevStats.lastEvictedSig !== undefined &&
-    prevStats.lastEvictedSig === directEvictedSig;
+    directEvictedParts.length > 0 &&
+    directEvictedParts.length <= prevEvictedParts.length &&
+    directEvictedParts.every((part, idx) => part === prevEvictedParts[idx]);
 
   let alignedShiftK = -1;
   if (
@@ -547,14 +558,13 @@ export function saveSolveRecordsWithStatus(records: SolveRecord[]): SolveSaveRes
 
   const evictedSig = newlyEvicted.map((r) => `${r.id}:${r.timeMs}`).join('|');
   const windowStats = computeWindowStats(recent);
-  const nextLastEvictedSig =
-    newlyEvicted.length > 0
+  const nextLastEvictedSig = isIdempotentRepeat
+    ? prevStats.lastEvictedSig ?? directEvictedSig
+    : newlyEvicted.length > 0
       ? evictedSig
-      : isIdempotentRepeat
-        ? directEvictedSig
-        : isSameWindowUpdate || alignedShiftK === 0
-          ? prevStats.lastEvictedSig
-          : undefined;
+      : isSameWindowUpdate || alignedShiftK === 0
+        ? prevStats.lastEvictedSig
+        : undefined;
 
   const nextStats: PersistedSolveStats = {
     version: STORAGE_SCHEMA_VERSION,

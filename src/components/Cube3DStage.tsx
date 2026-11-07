@@ -75,7 +75,7 @@ export function createWebGLRecoveryController(options: WebGLRecoveryControllerOp
       ignoringDisposalLoss = ignoring;
     },
     markSceneHealthy: () => {
-      if (disposed) return;
+      if (disposed || status === 'context-lost' || status === 'fallback-2d') return;
       clearRestoreTimer();
       updateStatus('healthy');
       clearStabilityTimer();
