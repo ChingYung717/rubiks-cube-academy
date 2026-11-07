@@ -75,9 +75,10 @@ npm run dev
 ### 常用脚本
 
 ```bash
-npm test          # 运行 Vitest 魔方引擎与课程套件单元测试
-npm run build     # TypeScript 类型检查 + Vite 生产构建
-npm run preview   # 本地预览生产构建产物
+npm test                     # 运行 Vitest 魔方引擎与课程套件单元测试
+npm run build                # TypeScript 类型检查 + Vite 生产构建（默认子路径 /rubiks-cube-academy/）
+npm run build -- --base=/    # 根路径 / 自定义域名部署构建（也可设置 VITE_BASE_PATH=/）
+npm run preview              # 本地预览生产构建产物
 ```
 
 ## 🗂️ 项目结构
