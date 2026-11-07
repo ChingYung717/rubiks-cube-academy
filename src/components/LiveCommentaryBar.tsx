@@ -14,7 +14,7 @@ interface LiveCommentaryBarProps {
   onToggleNarrationEnabled: () => void;
 }
 
-export const LiveCommentaryBar: React.FC<LiveCommentaryBarProps> = ({
+export const LiveCommentaryBar: React.FC<LiveCommentaryBarProps> = React.memo(({
   commentary,
   narrationEnabled,
   isSpeaking,
@@ -158,7 +158,7 @@ export const LiveCommentaryBar: React.FC<LiveCommentaryBarProps> = ({
             className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border transition-all cursor-pointer ${
               narrationEnabled
                 ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
-                : 'bg-slate-900 text-slate-500 border-slate-800 hover:text-slate-300'
+                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-300'
             }`}
           >
             {narrationEnabled ? '自动配音: 开' : '自动配音: 关'}
@@ -167,4 +167,4 @@ export const LiveCommentaryBar: React.FC<LiveCommentaryBarProps> = ({
       </div>
     </div>
   );
-};
+});

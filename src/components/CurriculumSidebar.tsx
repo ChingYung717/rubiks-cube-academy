@@ -16,7 +16,7 @@ const DIFFICULTY_STYLES: Record<Lesson['difficulty'], string> = {
   高阶: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
 };
 
-export const CurriculumSidebar: React.FC<CurriculumSidebarProps> = ({
+export const CurriculumSidebar: React.FC<CurriculumSidebarProps> = React.memo(({
   activeLessonId,
   completedLessons,
   onSelectLesson,
@@ -160,4 +160,4 @@ export const CurriculumSidebar: React.FC<CurriculumSidebarProps> = ({
       </div>
     </aside>
   );
-};
+});

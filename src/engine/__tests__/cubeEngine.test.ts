@@ -22,7 +22,13 @@ import {
   YELLOW_CROSS_CASES,
   getLessonInitialCube,
 } from '../../data/curriculum';
-import { computeAo5, formatTimeMs } from '../../utils/storage';
+import {
+  computeAo5,
+  formatTimeMs,
+  loadCompletedLessons,
+  loadSettings,
+  loadSolveRecords,
+} from '../../utils/storage';
 import {
   formatCubeCommentaryForSpeech,
   narrationEngine,
@@ -455,6 +461,9 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(combineMoveWithStack(['R2'], 'R2')).toEqual([]);
     expect(combineMoveWithStack(['R2'], "R'")).toEqual(['R']);
     expect(combineMoveWithStack(['R', 'U'], "U'")).toEqual(['R']);
+    // Commuting parallel layers on the same axis (e.g. R + L + R' -> L)
+    expect(combineMoveWithStack(['R', 'L'], "R'")).toEqual(['L']);
+    expect(combineMoveWithStack(['U', 'D'], 'U')).toEqual(['U2', 'D']);
   });
 
   it('maintains exact practice progression under double-turn half-steps, opposite cancellation, and error recovery', () => {
@@ -592,5 +601,56 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       { id: '5', timeMs: 15000, scramble: '', createdAt: '', moveCount: 20 },
     ];
     expect(computeAo5(recordsTwoDnf)).toBeNull();
+  });
+
+  it('validates and sanitizes persisted localStorage settings and records safely', () => {
+    const store: Record<string, string> = {};
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => {
+          store[k] = v;
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      // 1. Default settings returned as fresh copy
+      const s1 = loadSettings();
+      const s2 = loadSettings();
+      expect(s1).toEqual(s2);
+      expect(s1).not.toBe(s2);
+
+      // 2. Malformed settings (playbackSpeed: 0 or string, non-object JSON) fall back safely
+      store['cubelab_settings_v1'] = JSON.stringify({ playbackSpeed: 0, soundEnabled: 'yes' });
+      const s3 = loadSettings();
+      expect(s3.playbackSpeed).toBe(1);
+      expect(s3.soundEnabled).toBe(true);
+
+      store['cubelab_settings_v1'] = JSON.stringify('invalid_string_payload');
+      expect(loadSettings().playbackSpeed).toBe(1);
+
+      // 3. Malformed solve records are filtered out
+      store['cubelab_solve_records_v1'] = JSON.stringify([
+        { id: 'ok', timeMs: 9500, scramble: 'R U', createdAt: '12:00', moveCount: 15, penalty: '+2' },
+        { id: 'bad_nan', timeMs: 'not_a_number', scramble: 'R', createdAt: '12:00', moveCount: 10 },
+        { id: 'bad_penalty', timeMs: 8000, scramble: 'R', createdAt: '12:00', moveCount: 10, penalty: 'INVALID' },
+        null,
+      ]);
+      const loadedRecords = loadSolveRecords();
+      expect(loadedRecords).toHaveLength(1);
+      expect(loadedRecords[0].id).toBe('ok');
+
+      // 4. Malformed completed lessons are filtered
+      store['cubelab_completed_lessons_v1'] = JSON.stringify(['basics-structure', 123, '', null]);
+      expect(loadCompletedLessons()).toEqual(['basics-structure']);
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: origStorage,
+        configurable: true,
+      });
+    }
   });
 });

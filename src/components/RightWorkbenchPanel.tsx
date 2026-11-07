@@ -1,7 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { LAYER_BY_LAYER_STEPS, LESSONS, Lesson, YELLOW_CROSS_CASES, YellowCrossCase } from '../data/curriculum';
 import { getMoveDefinition, invertMove, parseAlgorithm } from '../engine/cubeEngine';
-import { SolveRecord, computeAo5, formatTimeMs } from '../utils/storage';
+import { SolvePenalty, SolveRecord, computeAo5, formatTimeMs } from '../utils/storage';
 import {
   AlertTriangle,
   ArrowRight,
@@ -62,6 +62,7 @@ interface RightWorkbenchPanelProps {
   onToggleTimer: () => void;
   onAutoSolveSandbox: () => void;
   onClearSolveRecords: () => void;
+  onUpdateSolvePenalty?: (id: string, penalty: SolvePenalty) => void;
   isAnimating: boolean;
   isAutoSolving?: boolean;
 }
@@ -103,9 +104,12 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
   onToggleTimer,
   onAutoSolveSandbox,
   onClearSolveRecords,
+  onUpdateSolvePenalty,
   isAnimating,
   isAutoSolving = false,
 }) => {
+  const [confirmingClear, setConfirmingClear] = useState(false);
+
   const currentLessonIndex = LESSONS.findIndex((l) => l.id === lesson.id);
   const prevLesson = currentLessonIndex > 0 ? LESSONS[currentLessonIndex - 1] : null;
   const nextLesson =
@@ -114,9 +118,14 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
       : null;
 
   const countableRecords = solveRecords.filter((record) => record.moveCount > 0);
+  const validTimedRecords = countableRecords.filter((record) => record.penalty !== 'DNF');
   const bestRecord =
-    countableRecords.length > 0
-      ? Math.min(...countableRecords.map((record) => record.timeMs))
+    validTimedRecords.length > 0
+      ? Math.min(
+          ...validTimedRecords.map(
+            (record) => record.timeMs + (record.penalty === '+2' ? 2000 : 0)
+          )
+        )
       : null;
   const ao5Ms = computeAo5(countableRecords);
 
@@ -157,7 +166,10 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
 
   if (workspaceMode === 'sandbox') {
     return (
-      <aside className="w-full lg:w-84 xl:w-92 shrink-0 h-full bg-[#0b101d] border-l border-slate-800/90 flex flex-col select-none overflow-y-auto custom-scrollbar p-4 space-y-4">
+      <aside
+        ref={asideRef}
+        className="w-full lg:w-84 xl:w-92 shrink-0 h-full bg-[#0b101d] border-l border-slate-800/90 flex flex-col select-none overflow-y-auto custom-scrollbar p-4 space-y-4"
+      >
         {/* Sandbox Header */}
         <div className="p-3.5 rounded-xl bg-gradient-to-br from-indigo-950/60 via-slate-900/90 to-slate-900 border border-indigo-500/30">
           <div className="flex items-center justify-between mb-1">
@@ -305,13 +317,33 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
               <span>个人速拧战绩榜 (本地存储)</span>
             </span>
             {solveRecords.length > 0 && (
-              <button
-                onClick={onClearSolveRecords}
-                className="text-[11px] text-slate-400 hover:text-rose-400 flex items-center gap-1 cursor-pointer"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>清空</span>
-              </button>
+              confirmingClear ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => {
+                      setConfirmingClear(false);
+                      onClearSolveRecords();
+                    }}
+                    className="px-2 py-0.5 rounded bg-rose-500/25 border border-rose-400/50 text-[11px] font-bold text-rose-200 hover:bg-rose-500/35 cursor-pointer"
+                  >
+                    确认清空
+                  </button>
+                  <button
+                    onClick={() => setConfirmingClear(false)}
+                    className="px-1.5 py-0.5 rounded bg-slate-800 text-[11px] text-slate-300 hover:bg-slate-700 cursor-pointer"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingClear(true)}
+                  className="text-[11px] text-slate-400 hover:text-rose-400 flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>清空</span>
+                </button>
+              )
             )}
           </div>
 
@@ -338,23 +370,76 @@ export const RightWorkbenchPanel: React.FC<RightWorkbenchPanelProps> = ({
 
           <div className="flex-1 overflow-y-auto space-y-1.5 max-h-48 pr-1">
             {solveRecords.length === 0 ? (
-              <div className="text-center py-6 text-xs text-slate-500">
+              <div className="text-center py-6 text-xs text-slate-400">
                 暂无计时还原记录。点击「随机打乱魔方」后开始计时挑战吧！
               </div>
             ) : (
-              solveRecords.map((rec, idx) => (
-                <div
-                  key={rec.id}
-                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-950/75 border border-slate-800/80 text-xs"
-                >
-                  <span className="font-mono text-slate-400">#{solveRecords.length - idx}</span>
-                  <span className="font-mono font-bold text-emerald-300">
-                    {formatTimeMs(rec.timeMs)}
-                  </span>
-                  <span className="text-[10px] text-slate-400">{rec.moveCount > 0 ? `${rec.moveCount} 步` : '旧记录 · 步数不详'}</span>
-                  <span className="text-[10px] text-slate-500">{rec.createdAt}</span>
-                </div>
-              ))
+              solveRecords.map((rec, idx) => {
+                const effectiveMs = rec.timeMs + (rec.penalty === '+2' ? 2000 : 0);
+                return (
+                  <div
+                    key={rec.id}
+                    className="flex items-center justify-between gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/75 border border-slate-800/80 text-xs"
+                  >
+                    <span className="font-mono text-slate-400">#{solveRecords.length - idx}</span>
+                    <span
+                      className={`font-mono font-bold ${
+                        rec.penalty === 'DNF'
+                          ? 'text-rose-400'
+                          : rec.penalty === '+2'
+                            ? 'text-amber-300'
+                            : 'text-emerald-300'
+                      }`}
+                    >
+                      {rec.penalty === 'DNF'
+                        ? 'DNF'
+                        : `${formatTimeMs(effectiveMs)}${rec.penalty === '+2' ? '+' : ''}`}
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      {rec.moveCount > 0 ? `${rec.moveCount} 步` : '旧记录'}
+                    </span>
+                    {onUpdateSolvePenalty && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSolvePenalty(
+                              rec.id,
+                              rec.penalty === '+2' ? 'none' : '+2'
+                            )
+                          }
+                          title="切换 WCA +2 秒罚时"
+                          className={`px-1 py-0.5 rounded text-[10px] font-mono border cursor-pointer ${
+                            rec.penalty === '+2'
+                              ? 'bg-amber-500/25 border-amber-400/60 text-amber-200'
+                              : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          +2
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSolvePenalty(
+                              rec.id,
+                              rec.penalty === 'DNF' ? 'none' : 'DNF'
+                            )
+                          }
+                          title="切换 WCA DNF (未完成)"
+                          className={`px-1 py-0.5 rounded text-[10px] font-mono border cursor-pointer ${
+                            rec.penalty === 'DNF'
+                              ? 'bg-rose-500/25 border-rose-400/60 text-rose-200'
+                              : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          DNF
+                        </button>
+                      </div>
+                    )}
+                    <span className="text-[10px] text-slate-400">{rec.createdAt}</span>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>

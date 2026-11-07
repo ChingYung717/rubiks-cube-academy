@@ -36,6 +36,7 @@ import { NotationGuideModal } from './components/NotationGuideModal';
 import { soundEngine } from './utils/soundEngine';
 import { narrationEngine } from './utils/narrationEngine';
 import {
+  SolvePenalty,
   SolveRecord,
   loadCompletedLessons,
   loadSettings,
@@ -1024,10 +1025,11 @@ export const App: React.FC = () => {
       if (validBases.includes(keyUpper) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         if (e.repeat) return;
-        const base =
-          keyUpper === 'X' || keyUpper === 'Y' || keyUpper === 'Z'
-            ? keyUpper.toLowerCase()
-            : keyUpper;
+        const isWholeCubeRot = keyUpper === 'X' || keyUpper === 'Y' || keyUpper === 'Z';
+        if (isWholeCubeRot && workspaceMode === 'course' && lessonTab === 'practice') {
+          return;
+        }
+        const base = isWholeCubeRot ? keyUpper.toLowerCase() : keyUpper;
         const token = e.shiftKey ? `${base}'` : base;
         handleUserMove(token);
       }
@@ -1097,9 +1099,18 @@ export const App: React.FC = () => {
         ? `🎬 演示模式 · ${activeLesson.badge} ${activeLesson.title}`
         : `🎮 动手跟练闯关 · 第 ${Math.min(practiceStep + 1, lessonMoves.length)}/${lessonMoves.length} 步`;
 
+  const handleUpdateSolvePenalty = useCallback((id: string, penalty: SolvePenalty) => {
+    setSolveRecords((prev) => {
+      const next = prev.map((r) => (r.id === id ? { ...r, penalty } : r));
+      saveSolveRecords(next);
+      return next;
+    });
+  }, []);
+
+  const netCube = activeAnimation ? activeAnimation.fromCube : displayedCube;
   const cubeNet = (
     <Cube2DNet
-      cube={displayedCube}
+      cube={netCube}
       focusMode={effectiveFocusMode}
       isCubieFocused={activeLesson.isCubieFocused}
       onFaceClick={handleUserMove}
@@ -1301,6 +1312,7 @@ export const App: React.FC = () => {
               setSolveRecords([]);
               saveSolveRecords([]);
             }}
+            onUpdateSolvePenalty={handleUpdateSolvePenalty}
             isAnimating={Boolean(activeAnimation)}
             isAutoSolving={autoSolveQueue.length > 0}
           />

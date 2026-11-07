@@ -41,7 +41,7 @@ const QUICK_MOVE_GROUPS = [
   { label: '底/后/中层', tokens: ['D', "D'", 'D2', 'B', "B'", 'B2', 'M', "M'", 'M2'] },
 ];
 
-export const FormulaTimelinePlayer: React.FC<FormulaTimelinePlayerProps> = ({
+export const FormulaTimelinePlayer: React.FC<FormulaTimelinePlayerProps> = React.memo(({
   mode,
   moves,
   currentStep,
@@ -364,4 +364,4 @@ export const FormulaTimelinePlayer: React.FC<FormulaTimelinePlayerProps> = ({
       )}
     </div>
   );
-};
+});

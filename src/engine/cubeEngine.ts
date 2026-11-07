@@ -554,25 +554,34 @@ function tokenFromClockwiseQuarterTurns(base: string, cwMod4: number): string | 
 
 /**
  * Appends moveToken to a move stack, combining or cancelling with the top of the stack
- * if both operate on the same base layer (e.g. R + R -> R2, R + R' -> pop, R2 + R -> R').
+ * if both operate on the same base layer (e.g. R + R -> R2, R + R' -> pop, R2 + R -> R'),
+ * including across commuting parallel layers on the same axis (e.g. R + L + R' -> L).
  */
 export function combineMoveWithStack(stack: string[], moveToken: string): string[] {
   const def = getMoveDefinition(moveToken);
   if (stack.length === 0) {
     return [def.token];
   }
-  const lastToken = stack[stack.length - 1];
-  const lastDef = getMoveDefinition(lastToken);
-  if (lastDef.base !== def.base) {
-    return [...stack, def.token];
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const entryDef = getMoveDefinition(stack[i]);
+    if (entryDef.axis !== def.axis) {
+      break;
+    }
+    if (entryDef.base === def.base) {
+      const combinedMod4 =
+        (getClockwiseQuarterTurnsMod4(entryDef.token) + getClockwiseQuarterTurnsMod4(def.token)) %
+        4;
+      const mergedToken = tokenFromClockwiseQuarterTurns(def.base, combinedMod4);
+      const next = [...stack];
+      if (!mergedToken) {
+        next.splice(i, 1);
+      } else {
+        next[i] = mergedToken;
+      }
+      return next;
+    }
   }
-  const combinedMod4 =
-    (getClockwiseQuarterTurnsMod4(lastDef.token) + getClockwiseQuarterTurnsMod4(def.token)) % 4;
-  const mergedToken = tokenFromClockwiseQuarterTurns(def.base, combinedMod4);
-  if (!mergedToken) {
-    return stack.slice(0, -1);
-  }
-  return [...stack.slice(0, -1), mergedToken];
+  return [...stack, def.token];
 }
 
 export interface PracticeProgressState {

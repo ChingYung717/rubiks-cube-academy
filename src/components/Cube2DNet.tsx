@@ -15,7 +15,7 @@ interface Cube2DNetProps {
   onFaceClick?: (faceDir: FaceDir) => void;
 }
 
-export const Cube2DNet: React.FC<Cube2DNetProps> = ({
+export const Cube2DNet: React.FC<Cube2DNetProps> = React.memo(({
   cube,
   focusMode,
   isCubieFocused,
@@ -102,4 +102,4 @@ export const Cube2DNet: React.FC<Cube2DNetProps> = ({
       </div>
     </div>
   );
-};
+});

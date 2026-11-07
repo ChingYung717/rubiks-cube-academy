@@ -26,9 +26,7 @@ interface Cube3DStageProps {
   show3DArrows: boolean;
   isCubieFocused: (cubie: Cubie) => boolean;
   onUserMove: (moveToken: string) => void;
-  interactiveEnabled?: boolean;
   modeBadgeText?: string;
-  subStatusText?: string;
   fallback: React.ReactNode;
   onWebGLUnavailable: () => void;
 }
@@ -56,7 +54,7 @@ const CAMERA_PRESETS: { label: string; theta: number; phi: number }[] = [
   { label: '后视车灯 (B - 背面)', theta: Math.PI + Math.PI / 5, phi: Math.PI / 3.1 },
 ];
 
-export const Cube3DStage: React.FC<Cube3DStageProps> = ({
+export const Cube3DStage: React.FC<Cube3DStageProps> = React.memo(({
   cube,
   activeAnimation,
   hintMoveToken,
@@ -64,9 +62,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
   show3DArrows,
   isCubieFocused,
   onUserMove,
-  interactiveEnabled = true,
   modeBadgeText,
-  subStatusText,
   fallback,
   onWebGLUnavailable,
 }) => {
@@ -75,6 +71,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
   const [webGLUnavailable, setWebGLUnavailable] = useState(false);
   const [sceneKey, setSceneKey] = useState(0);
   const contextLossCountRef = useRef(0);
+  const needsRenderRef = useRef(true);
 
   // Refs for mutable state accessed inside requestAnimationFrame & pointer handlers
   const cubeRef = useRef<Cubie[]>(cube);
@@ -88,9 +85,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
 
   const onUserMoveRef = useRef(onUserMove);
   onUserMoveRef.current = onUserMove;
-
-  const interactiveRef = useRef(interactiveEnabled);
-  interactiveRef.current = interactiveEnabled;
 
   const activeAnimRef = useRef<{
     id: number;
@@ -186,6 +180,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         }
       }
     }
+    needsRenderRef.current = true;
   };
 
   const hintMoveTokenRef = useRef<string | null>(hintMoveToken);
@@ -226,6 +221,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     const { arrowGroup } = objs;
 
     clearArrowGroup(arrowGroup);
+    needsRenderRef.current = true;
 
     if (!token || !show3DArrows) return;
 
@@ -523,7 +519,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       });
 
       const hits = raycaster.intersectObjects(allMeshes, false);
-      if (hits.length > 0 && interactiveRef.current && !activeAnimRef.current) {
+      if (hits.length > 0 && !activeAnimRef.current) {
         const hitObj = hits[0].object;
         const faceDir = hitObj.userData.faceDir as FaceDir;
         const parentGroup = hitObj.parent;
@@ -571,6 +567,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         const sph = cameraSphericalRef.current;
         sph.targetTheta -= dx * 0.0075;
         sph.targetPhi = Math.max(0.22, Math.min(Math.PI - 0.22, sph.targetPhi - dy * 0.0075));
+        needsRenderRef.current = true;
         return;
       }
 
@@ -732,6 +729,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       e.preventDefault();
       const sph = cameraSphericalRef.current;
       sph.radius = Math.max(5.2, Math.min(11.0, sph.radius + e.deltaY * 0.003));
+      needsRenderRef.current = true;
     };
 
     const domElem = renderer.domElement;
@@ -745,29 +743,46 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     window.addEventListener('pointerup', handlePointerUp);
     domElem.addEventListener('wheel', handleWheel, { passive: false });
 
-    // Animation loop
+    const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+
+    // Animation loop (on-demand rendering when idle to save mobile/laptop battery)
     let reqId = 0;
     const animate = (now: number) => {
       reqId = requestAnimationFrame(animate);
 
-      // Update camera spherical orbit with smooth damping
+      if (document.hidden || container.clientWidth === 0 || container.clientHeight === 0) {
+        return;
+      }
+
+      // Update camera spherical orbit with smooth damping (or instant snap under reduced motion)
       const sph = cameraSphericalRef.current;
-      sph.theta += (sph.targetTheta - sph.theta) * 0.14;
-      sph.phi += (sph.targetPhi - sph.phi) * 0.14;
-
-      camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
-      camera.position.y = sph.radius * Math.cos(sph.phi);
-      camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
-      camera.lookAt(0, 0, 0);
-
-      // Pulse 3D arrow slightly
-      if (arrowGroup.children.length > 0) {
-        const pulse = 1 + Math.sin(now * 0.006) * 0.025;
-        arrowGroup.scale.set(pulse, pulse, pulse);
+      const dTheta = sph.targetTheta - sph.theta;
+      const dPhi = sph.targetPhi - sph.phi;
+      const camMoving = Math.abs(dTheta) > 0.0005 || Math.abs(dPhi) > 0.0005;
+      if (camMoving) {
+        if (reducedMotionQuery?.matches) {
+          sph.theta = sph.targetTheta;
+          sph.phi = sph.targetPhi;
+        } else {
+          sph.theta += dTheta * 0.14;
+          sph.phi += dPhi * 0.14;
+        }
+        camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
+        camera.position.y = sph.radius * Math.cos(sph.phi);
+        camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
+        camera.lookAt(0, 0, 0);
+      } else if (needsRenderRef.current) {
+        sph.theta = sph.targetTheta;
+        sph.phi = sph.targetPhi;
+        camera.position.x = sph.radius * Math.sin(sph.phi) * Math.sin(sph.theta);
+        camera.position.y = sph.radius * Math.cos(sph.phi);
+        camera.position.z = sph.radius * Math.sin(sph.phi) * Math.cos(sph.theta);
+        camera.lookAt(0, 0, 0);
       }
 
       // Update active layer rotation animation if present
       const anim = activeAnimRef.current;
+      const isAnimating = Boolean(anim);
       if (anim) {
         const elapsed = Math.max(0, now - anim.startTime);
         const rawT = Math.min(1, elapsed / Math.max(40, anim.durationMs));
@@ -796,7 +811,8 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         }
       }
 
-      if (!document.hidden && container.clientWidth > 0 && container.clientHeight > 0) {
+      if (needsRenderRef.current || camMoving || isAnimating) {
+        needsRenderRef.current = false;
         renderer.render(scene, camera);
       }
     };
@@ -814,7 +830,9 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       camera.aspect = w / h;
       camera.zoom = Math.min(w < 640 ? 0.82 : 1, camera.aspect / 1.15);
       camera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(w, h);
+      needsRenderRef.current = false;
       renderer.render(scene, camera);
     });
     resizeObserver.observe(container);
@@ -844,6 +862,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         rec.bodyMat.dispose();
         Object.values(rec.stickers).forEach((m) => m.dispose());
       });
+      renderer.forceContextLoss?.();
       renderer.dispose();
       domElem.remove();
       sceneObjectsRef.current = null;
@@ -918,6 +937,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     setActivePresetIdx(idx);
     cameraSphericalRef.current.targetTheta = preset.theta;
     cameraSphericalRef.current.targetPhi = preset.phi;
+    needsRenderRef.current = true;
   };
 
   const effectiveHintToken = activeAnimation?.moveToken ?? hintMoveToken;
@@ -1046,12 +1066,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
             <i className="w-2 h-2 rounded-xs bg-[#EF4444]" /> 右红(R)
           </span>
         </div>
-        {subStatusText && (
-          <div className="px-2.5 py-1 rounded-lg bg-cyan-950/70 border border-cyan-500/30 text-[11px] text-cyan-200">
-            {subStatusText}
-          </div>
-        )}
       </div>
     </div>
   );
-};
+});

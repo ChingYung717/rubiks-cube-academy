@@ -29,7 +29,7 @@ interface TopNavbarProps {
   onOpenGuideModal: () => void;
 }
 
-export const TopNavbar: React.FC<TopNavbarProps> = ({
+export const TopNavbar: React.FC<TopNavbarProps> = React.memo(({
   workspaceMode,
   onSwitchWorkspaceMode,
   focusMode,
@@ -175,7 +175,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           className={`p-2 rounded-lg border transition-all cursor-pointer ${
             soundEnabled
               ? 'bg-slate-800 text-cyan-300 border-cyan-500/40'
-              : 'bg-slate-900 text-slate-500 border-slate-800 hover:text-slate-300'
+              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-300'
           }`}
         >
           {soundEnabled ? (
@@ -198,4 +198,4 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       </div>
     </header>
   );
-};
+});
