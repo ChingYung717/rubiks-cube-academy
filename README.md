@@ -75,7 +75,7 @@ npm run dev
 ### 常用脚本
 
 ```bash
-npm test          # 运行 Vitest 魔方引擎与课程套件单元测试（19 项测试）
+npm test          # 运行 Vitest 魔方引擎与课程套件单元测试
 npm run build     # TypeScript 类型检查 + Vite 生产构建
 npm run preview   # 本地预览生产构建产物
 ```

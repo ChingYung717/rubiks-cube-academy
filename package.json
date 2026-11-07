@@ -2,6 +2,16 @@
   "name": "rubiks-cube-academy",
   "private": true,
   "version": "1.0.0",
+  "description": "CubeLab 3D · 三维魔方沉浸式交互学院 — 从零基础层先法到 CFOP 速拧的 3D 交互式魔方教学应用",
+  "license": "MIT",
+  "homepage": "https://chingyung717.github.io/rubiks-cube-academy/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChingYung717/rubiks-cube-academy.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -26,6 +36,6 @@
     "tailwindcss": "^4.0.0",
     "typescript": "~5.6.2",
     "vite": "^6.0.1",
-    "vitest": "^2.1.8"
+    "vitest": "^5.1.0"
   }
 }

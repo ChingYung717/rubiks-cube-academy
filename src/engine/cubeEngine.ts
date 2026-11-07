@@ -198,6 +198,26 @@ const BASE_MOVES: Record<
     cwFingerZh: '同时压动前两层顺时针旋转',
     ccwFingerZh: '同时挑动前两层逆时针旋转',
   },
+  d: {
+    axis: 'y',
+    layers: [-1, 0],
+    cwQuarterTurn: 1,
+    layerNameZh: '底两层 (d/Dw)',
+    cwActionZh: '双层顺时针右拨 90°',
+    ccwActionZh: '双层逆时针左拨 90°',
+    cwFingerZh: '同时推动底两层向右',
+    ccwFingerZh: '同时推动底两层向左',
+  },
+  b: {
+    axis: 'z',
+    layers: [-1, 0],
+    cwQuarterTurn: 1,
+    layerNameZh: '后两层 (b/Bw)',
+    cwActionZh: '双层顺时针左拨 90°',
+    ccwActionZh: '双层逆时针右拨 90°',
+    cwFingerZh: '同时拨动后两层向左',
+    ccwFingerZh: '同时拨动后两层向右',
+  },
   x: {
     axis: 'x',
     layers: [-1, 0, 1],
@@ -271,8 +291,14 @@ export function cloneCube(cube: Cubie[]): Cubie[] {
 
 export function getMoveDefinition(rawToken: string): MoveDefinition {
   const token = rawToken.trim();
-  const base = token[0];
-  const modifier = token.slice(1);
+  const match = token.match(/^([RLUDFBMESxyz]|[RLUDFB]w|[rludfb])(2['’′]?|['’′]2|['’′])?$/);
+  if (!match) {
+    throw new Error(`Unknown move token: ${rawToken}`);
+  }
+
+  const rawBase = match[1];
+  const base = rawBase.endsWith('w') ? rawBase[0].toLowerCase() : rawBase;
+  const rawMod = (match[2] ?? '').replace(/[’′]/g, "'");
   const spec = BASE_MOVES[base];
   if (!spec) {
     throw new Error(`Unknown move token: ${rawToken}`);
@@ -281,19 +307,22 @@ export function getMoveDefinition(rawToken: string): MoveDefinition {
   let quarterTurns: number = spec.cwQuarterTurn;
   let nameZh = `${spec.layerNameZh}${spec.cwActionZh}`;
   let fingerTrickZh = spec.cwFingerZh;
+  let normalizedToken = base;
 
-  if (modifier === "'" || modifier === '’') {
+  if (rawMod === "'") {
     quarterTurns = -spec.cwQuarterTurn;
     nameZh = `${spec.layerNameZh}${spec.ccwActionZh}`;
     fingerTrickZh = spec.ccwFingerZh;
-  } else if (modifier === '2' || modifier === "2'") {
+    normalizedToken = `${base}'`;
+  } else if (rawMod === '2' || rawMod === "2'" || rawMod === "'2") {
     quarterTurns = spec.cwQuarterTurn * 2;
     nameZh = `${spec.layerNameZh}旋转 180° (连转两次)`;
     fingerTrickZh = `${spec.cwFingerZh}，连续拨动两次 180°`;
+    normalizedToken = `${base}2`;
   }
 
   return {
-    token: modifier === '’' ? `${base}'` : modifier === "2'" ? `${base}2` : token,
+    token: normalizedToken,
     base,
     axis: spec.axis,
     layers: spec.layers,
@@ -575,6 +604,43 @@ export function evaluatePracticeMoveStep(
       arr.reduce((sum, tok) => sum + Math.abs(getMoveDefinition(tok).quarterTurns), 0);
     const prevTurns = countQuarterTurns(current.errors);
     const nextErrors = combineMoveWithStack(current.errors, moveToken);
+
+    // Check if the combined net moves from the current step now match the expected move or a valid half-turn
+    if (current.step < lessonMoves.length) {
+      const expected = getMoveDefinition(lessonMoves[current.step]).token;
+      const fullStack = current.halfTurnToken
+        ? nextErrors.reduce((s, tok) => combineMoveWithStack(s, tok), [current.halfTurnToken])
+        : nextErrors;
+
+      if (fullStack.length === 0) {
+        return {
+          step: current.step,
+          halfTurnToken: null,
+          errors: [],
+          stepAdvanced: true,
+          madeMistake: false,
+        };
+      }
+      if (fullStack.length === 1 && fullStack[0] === expected) {
+        return {
+          step: current.step + 1,
+          halfTurnToken: null,
+          errors: [],
+          stepAdvanced: true,
+          madeMistake: false,
+        };
+      }
+      if (fullStack.length === 1 && isHalfOfDoubleMove(fullStack[0], expected)) {
+        return {
+          step: current.step,
+          halfTurnToken: fullStack[0],
+          errors: [],
+          stepAdvanced: true,
+          madeMistake: false,
+        };
+      }
+    }
+
     const nextTurns = countQuarterTurns(nextErrors);
     const reduced = nextTurns < prevTurns || nextErrors.length < current.errors.length;
     return {

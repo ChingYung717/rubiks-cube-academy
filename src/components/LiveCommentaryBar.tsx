@@ -54,7 +54,7 @@ export const LiveCommentaryBar: React.FC<LiveCommentaryBarProps> = ({
     >
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
         {/* Left & Center: Coach Badge + Live Synchronized Chinese Commentary Subtitle */}
-        <div className="flex-1 min-w-0 space-y-1">
+        <div className="flex-1 min-w-0 space-y-1" aria-live="polite">
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="live-commentary-badge"

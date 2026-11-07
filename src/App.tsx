@@ -231,6 +231,7 @@ export const App: React.FC = () => {
         particleCount: 70,
         spread: 65,
         origin: { y: 0.6 },
+        disableForReducedMotion: true,
       });
     } catch {
       // ignore in headless environments without canvas support
@@ -346,6 +347,7 @@ export const App: React.FC = () => {
         moveToken,
         durationMs,
         onFinish: () => {
+          if (nextId !== animIdCounterRef.current - 1) return;
           isAnimatingRef.current = false;
           setActiveAnimation(null);
           onDone();
@@ -1006,8 +1008,8 @@ export const App: React.FC = () => {
         ) {
           return;
         }
-        if (workspaceMode === 'course' && lessonTab !== 'demo') return;
         e.preventDefault();
+        if (workspaceMode === 'course' && lessonTab !== 'demo') return;
         if (e.repeat) return;
         if (workspaceMode === 'sandbox') {
           handleToggleTimer();
@@ -1021,6 +1023,7 @@ export const App: React.FC = () => {
       const validBases = ['R', 'L', 'U', 'D', 'F', 'B', 'M', 'X', 'Y', 'Z'];
       if (validBases.includes(keyUpper) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
+        if (e.repeat) return;
         const base =
           keyUpper === 'X' || keyUpper === 'Y' || keyUpper === 'Z'
             ? keyUpper.toLowerCase()
@@ -1104,7 +1107,7 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="w-full h-dvh flex flex-col bg-[#090d16] text-slate-100 overflow-hidden">
+    <div className="w-full h-screen h-dvh flex flex-col bg-[#090d16] text-slate-100 overflow-hidden">
       {/* Top Navigation Bar */}
       <TopNavbar
         workspaceMode={workspaceMode}
@@ -1169,7 +1172,6 @@ export const App: React.FC = () => {
             completedLessons={completedLessons}
             onSelectLesson={handleSelectLesson}
             workspaceMode={workspaceMode}
-            onSwitchWorkspaceMode={handleSwitchWorkspaceMode}
           />
         </div>
 

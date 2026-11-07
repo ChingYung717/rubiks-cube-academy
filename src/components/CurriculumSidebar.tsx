@@ -7,7 +7,6 @@ interface CurriculumSidebarProps {
   completedLessons: string[];
   onSelectLesson: (lesson: Lesson) => void;
   workspaceMode: 'course' | 'sandbox';
-  onSwitchWorkspaceMode: (mode: 'course' | 'sandbox') => void;
 }
 
 const DIFFICULTY_STYLES: Record<Lesson['difficulty'], string> = {
@@ -22,7 +21,6 @@ export const CurriculumSidebar: React.FC<CurriculumSidebarProps> = ({
   completedLessons,
   onSelectLesson,
   workspaceMode,
-  onSwitchWorkspaceMode,
 }) => {
   const totalCount = LESSONS.length;
   const doneCount = completedLessons.length;
@@ -91,6 +89,7 @@ export const CurriculumSidebar: React.FC<CurriculumSidebarProps> = ({
                     <button
                       key={lesson.id}
                       onClick={() => onSelectLesson(lesson)}
+                      aria-current={isActive ? 'step' : undefined}
                       data-testid={`lesson-item-${lesson.id}`}
                       className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-start gap-2.5 cursor-pointer group ${
                         isActive

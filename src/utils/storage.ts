@@ -1,9 +1,12 @@
+export type SolvePenalty = 'none' | '+2' | 'DNF';
+
 export interface SolveRecord {
   id: string;
   timeMs: number;
   scramble: string;
   createdAt: string;
   moveCount: number;
+  penalty?: SolvePenalty;
 }
 
 export interface PersistedSettings {
@@ -30,12 +33,35 @@ const DEFAULT_SETTINGS: PersistedSettings = {
   playbackSpeed: 1,
 };
 
+function isValidSolveRecord(item: unknown): item is SolveRecord {
+  if (typeof item !== 'object' || item === null) return false;
+  const r = item as Record<string, unknown>;
+  if (typeof r.id !== 'string' || !r.id) return false;
+  if (typeof r.timeMs !== 'number' || !Number.isFinite(r.timeMs) || r.timeMs < 0) return false;
+  if (typeof r.scramble !== 'string') return false;
+  if (typeof r.createdAt !== 'string') return false;
+  if (typeof r.moveCount !== 'number' || !Number.isFinite(r.moveCount) || r.moveCount < 0) {
+    return false;
+  }
+  if (
+    r.penalty !== undefined &&
+    r.penalty !== 'none' &&
+    r.penalty !== '+2' &&
+    r.penalty !== 'DNF'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function loadCompletedLessons(): string[] {
   try {
     const raw = localStorage.getItem(KEYS.COMPLETED_LESSONS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
   } catch {
     return [];
   }
@@ -54,7 +80,7 @@ export function loadSolveRecords(): SolveRecord[] {
     const raw = localStorage.getItem(KEYS.SOLVE_RECORDS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.filter(isValidSolveRecord) : [];
   } catch {
     return [];
   }
@@ -71,10 +97,33 @@ export function saveSolveRecords(records: SolveRecord[]): void {
 export function loadSettings(): PersistedSettings {
   try {
     const raw = localStorage.getItem(KEYS.SETTINGS);
-    if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { ...DEFAULT_SETTINGS };
+    }
+    const obj = parsed as Record<string, unknown>;
+    const rawSpeed = obj.playbackSpeed;
+    const validSpeed =
+      typeof rawSpeed === 'number' && Number.isFinite(rawSpeed) && rawSpeed >= 0.25 && rawSpeed <= 4
+        ? rawSpeed
+        : DEFAULT_SETTINGS.playbackSpeed;
+
+    return {
+      soundEnabled:
+        typeof obj.soundEnabled === 'boolean' ? obj.soundEnabled : DEFAULT_SETTINGS.soundEnabled,
+      narrationEnabled:
+        typeof obj.narrationEnabled === 'boolean'
+          ? obj.narrationEnabled
+          : DEFAULT_SETTINGS.narrationEnabled,
+      focusMode: typeof obj.focusMode === 'boolean' ? obj.focusMode : DEFAULT_SETTINGS.focusMode,
+      show3DArrows:
+        typeof obj.show3DArrows === 'boolean' ? obj.show3DArrows : DEFAULT_SETTINGS.show3DArrows,
+      show2DNet: typeof obj.show2DNet === 'boolean' ? obj.show2DNet : DEFAULT_SETTINGS.show2DNet,
+      playbackSpeed: validSpeed,
+    };
   } catch {
-    return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
@@ -87,10 +136,12 @@ export function saveSettings(settings: PersistedSettings): void {
 }
 
 export function formatTimeMs(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
+  if (!Number.isFinite(ms)) return 'DNF';
+  const safeMs = Math.max(0, ms);
+  const totalSeconds = Math.floor(safeMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  const centiseconds = Math.floor((ms % 1000) / 10);
+  const centiseconds = Math.floor((safeMs % 1000) / 10);
   const csStr = centiseconds.toString().padStart(2, '0');
   if (minutes > 0) {
     return `${minutes}:${seconds.toString().padStart(2, '0')}.${csStr}`;
@@ -100,11 +151,24 @@ export function formatTimeMs(ms: number): string {
 
 /**
  * Calculates WCA Average of 5 (Ao5) from the most recent 5 solves:
- * drops the fastest and slowest, averages the middle 3.
+ * - Applies optional +2 (2000ms) or DNF penalties
+ * - Truncates individual solve times to centiseconds (10ms)
+ * - Drops the fastest and slowest, averages the middle 3, and rounds to nearest centisecond
+ * - Returns null if fewer than 5 solves or if 2+ solves in the window are DNF
  */
 export function computeAo5(records: SolveRecord[]): number | null {
   if (records.length < 5) return null;
-  const recent5 = records.slice(0, 5).map((r) => r.timeMs).sort((a, b) => a - b);
-  const middle3Sum = recent5[1] + recent5[2] + recent5[3];
-  return Math.round(middle3Sum / 3);
+  const recent5 = records.slice(0, 5).map((r) => {
+    if (r.penalty === 'DNF' || !Number.isFinite(r.timeMs) || r.timeMs < 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const effectiveMs = r.timeMs + (r.penalty === '+2' ? 2000 : 0);
+    return Math.floor(effectiveMs / 10) * 10;
+  });
+  recent5.sort((a, b) => a - b);
+  if (!Number.isFinite(recent5[3])) {
+    return null;
+  }
+  const middle3Mean = (recent5[1] + recent5[2] + recent5[3]) / 3;
+  return Math.round(middle3Mean / 10) * 10;
 }

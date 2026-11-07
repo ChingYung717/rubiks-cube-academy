@@ -40,7 +40,26 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
   });
 
   it('satisfies R followed by R\' returns to solved state for all base moves', () => {
-    const bases = ['R', 'L', 'U', 'D', 'F', 'B', 'M', 'E', 'S', 'r', 'l', 'u', 'f', 'x', 'y', 'z'];
+    const bases = [
+      'R',
+      'L',
+      'U',
+      'D',
+      'F',
+      'B',
+      'M',
+      'E',
+      'S',
+      'r',
+      'l',
+      'u',
+      'f',
+      'd',
+      'b',
+      'x',
+      'y',
+      'z',
+    ];
     for (const b of bases) {
       const solved = createSolvedCube();
       const moved = applyMove(solved, b);
@@ -52,6 +71,56 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
       const doubleRestored = applyMove(doubleMoved, `${b}2`);
       expect(doubleRestored).toEqual(solved);
     }
+  });
+
+  it('verifies exact WCA sticker-level move directions for R, L, U, D, F, B, M, E, S, and wide moves', () => {
+    const solved = createSolvedCube();
+
+    // Standard orientation: U=Y, D=W, F=B, B=G, L=O, R=R
+    // R (clockwise looking at R): brings F (Blue) right column up to U right column
+    const afterR = extract2DNet(applyMove(solved, 'R'));
+    expect(afterR.U.map((row) => row[2].color)).toEqual(['B', 'B', 'B']);
+    expect(afterR.F.map((row) => row[2].color)).toEqual(['W', 'W', 'W']);
+
+    // L (clockwise looking at L): brings U (Yellow) left column down to F left column
+    const afterL = extract2DNet(applyMove(solved, 'L'));
+    expect(afterL.F.map((row) => row[0].color)).toEqual(['Y', 'Y', 'Y']);
+    expect(afterL.U.map((row) => row[0].color)).toEqual(['G', 'G', 'G']);
+
+    // U (clockwise looking at U): brings R (Red) top row to F top row
+    const afterU = extract2DNet(applyMove(solved, 'U'));
+    expect(afterU.F[0].map((s) => s.color)).toEqual(['R', 'R', 'R']);
+    expect(afterU.L[0].map((s) => s.color)).toEqual(['B', 'B', 'B']);
+
+    // D (clockwise looking at D): brings L (Orange) bottom row to F bottom row
+    const afterD = extract2DNet(applyMove(solved, 'D'));
+    expect(afterD.F[2].map((s) => s.color)).toEqual(['O', 'O', 'O']);
+    expect(afterD.R[2].map((s) => s.color)).toEqual(['B', 'B', 'B']);
+
+    // F (clockwise looking at F): brings U (Yellow) bottom row to R left column
+    const afterF = extract2DNet(applyMove(solved, 'F'));
+    expect(afterF.R.map((row) => row[0].color)).toEqual(['Y', 'Y', 'Y']);
+    expect(afterF.U[2].map((s) => s.color)).toEqual(['O', 'O', 'O']);
+
+    // B (clockwise looking at B): brings R (Red) right column to U top row
+    const afterB = extract2DNet(applyMove(solved, 'B'));
+    expect(afterB.U[0].map((s) => s.color)).toEqual(['R', 'R', 'R']);
+
+    // M (follows L): brings U middle column down to F middle column
+    const afterM = extract2DNet(applyMove(solved, 'M'));
+    expect(afterM.F.map((row) => row[1].color)).toEqual(['Y', 'Y', 'Y']);
+
+    // E (follows D): brings L middle row to F middle row
+    const afterE = extract2DNet(applyMove(solved, 'E'));
+    expect(afterE.F[1].map((s) => s.color)).toEqual(['O', 'O', 'O']);
+
+    // S (follows F): brings U middle row to R middle column
+    const afterS = extract2DNet(applyMove(solved, 'S'));
+    expect(afterS.R.map((row) => row[1].color)).toEqual(['Y', 'Y', 'Y']);
+
+    // Wide move Rw === r (rotates both middle and right layers like R)
+    expect(applyMove(solved, 'Rw')).toEqual(applyMove(solved, 'r'));
+    expect(applyMove(solved, "Lw'")).toEqual(applyMove(solved, "l'"));
   });
 
   it('preserves solved state under whole-cube rotations x, y, z', () => {
@@ -358,7 +427,16 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(parseAlgorithm("  (R U R’ U') [F2] ")).toEqual(['R', 'U', "R’", "U'", 'F2']);
     expect(applyAlgorithm(solved, '')).toEqual(solved);
     expect(getMoveDefinition('R’').token).toBe("R'");
+    expect(getMoveDefinition('R′').token).toBe("R'");
+    expect(getMoveDefinition("R'2").token).toBe('R2');
+    expect(getMoveDefinition('R2’').token).toBe('R2');
+    expect(getMoveDefinition('Rw').token).toBe('r');
+    expect(getMoveDefinition("Uw'").token).toBe("u'");
     expect(() => getMoveDefinition('Z_INVALID')).toThrow(/Unknown move token/);
+    expect(() => getMoveDefinition('R3')).toThrow(/Unknown move token/);
+    expect(() => getMoveDefinition('R,')).toThrow(/Unknown move token/);
+    expect(() => getMoveDefinition('RU')).toThrow(/Unknown move token/);
+    expect(() => getMoveDefinition("RUR'U'")).toThrow(/Unknown move token/);
   });
 
   it('recognizes half-turn moves toward a 180-degree double turn', () => {
@@ -446,10 +524,40 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     expect(errState.errors).toEqual(['F']);
     expect(errState.stepAdvanced).toBe(true);
     expect(errState.madeMistake).toBe(false);
+
+    // 8. Overshoot recovery: expecting 'R' at step 0, user plays "R'" then 'R2' -> net is 'R', so advances to step 1!
+    let overshoot = evaluatePracticeMoveStep(
+      { step: 0, halfTurnToken: null, errors: [] },
+      "R'",
+      lessonMoves
+    );
+    expect(overshoot.errors).toEqual(["R'"]);
+    overshoot = evaluatePracticeMoveStep(overshoot, 'R2', lessonMoves);
+    expect(overshoot.step).toBe(1);
+    expect(overshoot.halfTurnToken).toBeNull();
+    expect(overshoot.errors).toEqual([]);
+    expect(overshoot.stepAdvanced).toBe(true);
+    expect(overshoot.madeMistake).toBe(false);
+
+    // 9. Double-turn overshoot recovery: expecting 'U2' at step 5, user plays 'U', 'U2', "U'" -> net is 'U2', advances to step 6!
+    let u2Overshoot = evaluatePracticeMoveStep(
+      { step: 5, halfTurnToken: null, errors: [] },
+      'U',
+      lessonMoves
+    );
+    u2Overshoot = evaluatePracticeMoveStep(u2Overshoot, 'U2', lessonMoves);
+    expect(u2Overshoot.errors).toEqual(['U2']);
+    u2Overshoot = evaluatePracticeMoveStep(u2Overshoot, "U'", lessonMoves);
+    expect(u2Overshoot.step).toBe(6);
+    expect(u2Overshoot.halfTurnToken).toBeNull();
+    expect(u2Overshoot.errors).toEqual([]);
   });
 
   it('computes WCA Ao5 and formats timer milliseconds accurately', () => {
     expect(formatTimeMs(0)).toBe('0.00s');
+    expect(formatTimeMs(-50)).toBe('0.00s');
+    expect(formatTimeMs(Number.NaN)).toBe('DNF');
+    expect(formatTimeMs(Number.POSITIVE_INFINITY)).toBe('DNF');
     expect(formatTimeMs(9450)).toBe('9.45s');
     expect(formatTimeMs(65230)).toBe('1:05.23');
 
@@ -463,5 +571,26 @@ describe('Rubik Cube 3x3 Engine & Curriculum Suite', () => {
     ];
     // Middle 3: 10000, 12000, 14000 -> avg = 12000
     expect(computeAo5(records)).toBe(12000);
+
+    // With 1 DNF (dropped as slowest) and +2 penalty on id 1 (10000 + 2000 = 12000):
+    const recordsWithPenalty = [
+      { id: '1', timeMs: 10000, penalty: '+2' as const, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '2', timeMs: 12000, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '3', timeMs: 8000, scramble: '', createdAt: '', moveCount: 20 }, // fastest dropped
+      { id: '4', timeMs: 11000, penalty: 'DNF' as const, scramble: '', createdAt: '', moveCount: 20 }, // slowest dropped
+      { id: '5', timeMs: 15000, scramble: '', createdAt: '', moveCount: 20 },
+    ];
+    // Middle 3: 12000, 12000, 15000 -> avg = 13000
+    expect(computeAo5(recordsWithPenalty)).toBe(13000);
+
+    // With 2 DNFs -> Ao5 is null (DNF)
+    const recordsTwoDnf = [
+      { id: '1', timeMs: 10000, penalty: 'DNF' as const, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '2', timeMs: 12000, penalty: 'DNF' as const, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '3', timeMs: 8000, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '4', timeMs: 11000, scramble: '', createdAt: '', moveCount: 20 },
+      { id: '5', timeMs: 15000, scramble: '', createdAt: '', moveCount: 20 },
+    ];
+    expect(computeAo5(recordsTwoDnf)).toBeNull();
   });
 });

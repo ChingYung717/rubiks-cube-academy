@@ -73,6 +73,8 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [activePresetIdx, setActivePresetIdx] = useState(0);
   const [webGLUnavailable, setWebGLUnavailable] = useState(false);
+  const [sceneKey, setSceneKey] = useState(0);
+  const contextLossCountRef = useRef(0);
 
   // Refs for mutable state accessed inside requestAnimationFrame & pointer handlers
   const cubeRef = useRef<Cubie[]>(cube);
@@ -184,7 +186,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         }
       }
     }
-    objs.renderer.render(objs.scene, objs.camera);
   };
 
   const hintMoveTokenRef = useRef<string | null>(hintMoveToken);
@@ -337,7 +338,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       }
       arrowGroup.add(ringMesh);
     }
-    objs.renderer.render(objs.scene, objs.camera);
   };
 
   // Initialize Three.js Scene
@@ -364,11 +364,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     camera.lookAt(0, 0, 0);
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({
-        antialias: true,
-        alpha: true,
-        preserveDrawingBuffer: true,
-      });
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     } catch {
       useFallback();
       return;
@@ -474,6 +470,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     // Pointer interaction: Raycast cubie sticker drag vs Orbit camera drag
     const raycaster = new THREE.Raycaster();
     let pointerState: {
+      pointerId: number;
       mode: 'orbit' | 'sticker';
       startX: number;
       startY: number;
@@ -493,9 +490,19 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       );
     };
 
+    const capturePointer = (pointerId: number) => {
+      try {
+        renderer.domElement.setPointerCapture(pointerId);
+      } catch {
+        // ignore synthetic events where pointerId is not active
+      }
+    };
+
     const handlePointerDown = (e: PointerEvent) => {
+      capturePointer(e.pointerId);
       if (e.button !== 0) {
         pointerState = {
+          pointerId: e.pointerId,
           mode: 'orbit',
           startX: e.clientX,
           startY: e.clientY,
@@ -523,6 +530,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         const cubiePos = parentGroup?.userData?.pos as [number, number, number] | undefined;
         if (faceDir && cubiePos) {
           pointerState = {
+            pointerId: e.pointerId,
             mode: 'sticker',
             startX: e.clientX,
             startY: e.clientY,
@@ -538,6 +546,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       }
 
       pointerState = {
+        pointerId: e.pointerId,
         mode: 'orbit',
         startX: e.clientX,
         startY: e.clientY,
@@ -548,6 +557,10 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
 
     const handlePointerMove = (e: PointerEvent) => {
       if (!pointerState) return;
+      if (e.pointerType === 'mouse' && e.buttons === 0) {
+        pointerState = null;
+        return;
+      }
 
       if (pointerState.mode === 'orbit') {
         const dx = e.clientX - pointerState.lastX;
@@ -686,7 +699,33 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     };
 
     const handlePointerUp = () => {
+      if (pointerState) {
+        try {
+          if (renderer.domElement.hasPointerCapture(pointerState.pointerId)) {
+            renderer.domElement.releasePointerCapture(pointerState.pointerId);
+          }
+        } catch {
+          // ignore
+        }
+      }
       pointerState = null;
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
+    const handleContextLost = (e: Event) => {
+      if (contextLossCountRef.current < 2) {
+        e.preventDefault();
+        contextLossCountRef.current += 1;
+      } else {
+        useFallback();
+      }
+    };
+
+    const handleContextRestored = () => {
+      setSceneKey((k) => k + 1);
     };
 
     const handleWheel = (e: WheelEvent) => {
@@ -696,8 +735,12 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
     };
 
     const domElem = renderer.domElement;
-    domElem.addEventListener('webglcontextlost', useFallback);
+    domElem.addEventListener('webglcontextlost', handleContextLost);
+    domElem.addEventListener('webglcontextrestored', handleContextRestored);
+    domElem.addEventListener('contextmenu', handleContextMenu);
     domElem.addEventListener('pointerdown', handlePointerDown);
+    domElem.addEventListener('pointercancel', handlePointerUp);
+    domElem.addEventListener('lostpointercapture', handlePointerUp);
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     domElem.addEventListener('wheel', handleWheel, { passive: false });
@@ -726,11 +769,6 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       // Update active layer rotation animation if present
       const anim = activeAnimRef.current;
       if (anim) {
-        if (!anim.started) {
-          anim.started = true;
-          const def = getMoveDefinition(anim.moveToken);
-          syncCubieMeshes(anim.fromCube, { axis: def.axis, layers: def.layers }, true);
-        }
         const elapsed = Math.max(0, now - anim.startTime);
         const rawT = Math.min(1, elapsed / Math.max(40, anim.durationMs));
         // Cubic ease out
@@ -758,30 +796,48 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         }
       }
 
-      renderer.render(scene, camera);
+      if (!document.hidden && container.clientWidth > 0 && container.clientHeight > 0) {
+        renderer.render(scene, camera);
+      }
     };
     reqId = requestAnimationFrame(animate);
 
+    let lastW = width;
+    let lastH = height;
     const resizeObserver = new ResizeObserver(() => {
       if (!container) return;
-      const w = container.clientWidth || 640;
-      const h = container.clientHeight || 480;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w === 0 || h === 0 || (w === lastW && h === lastH)) return;
+      lastW = w;
+      lastH = h;
       camera.aspect = w / h;
       camera.zoom = Math.min(w < 640 ? 0.82 : 1, camera.aspect / 1.15);
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      renderer.render(scene, camera);
     });
     resizeObserver.observe(container);
 
     return () => {
       cancelAnimationFrame(reqId);
       resizeObserver.disconnect();
-      domElem.removeEventListener('webglcontextlost', useFallback);
+      domElem.removeEventListener('webglcontextlost', handleContextLost);
+      domElem.removeEventListener('webglcontextrestored', handleContextRestored);
+      domElem.removeEventListener('contextmenu', handleContextMenu);
       domElem.removeEventListener('pointerdown', handlePointerDown);
+      domElem.removeEventListener('pointercancel', handlePointerUp);
+      domElem.removeEventListener('lostpointercapture', handlePointerUp);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       domElem.removeEventListener('wheel', handleWheel);
       clearArrowGroup(arrowGroup);
+      gridHelper.geometry.dispose();
+      if (Array.isArray(gridHelper.material)) {
+        gridHelper.material.forEach((m) => m.dispose());
+      } else {
+        gridHelper.material.dispose();
+      }
       bodyGeo.dispose();
       stickerGeo.dispose();
       cubieMeshes.forEach((rec) => {
@@ -789,9 +845,10 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
         Object.values(rec.stickers).forEach((m) => m.dispose());
       });
       renderer.dispose();
+      domElem.remove();
       sceneObjectsRef.current = null;
     };
-  }, [webGLUnavailable, onWebGLUnavailable]);
+  }, [webGLUnavailable, onWebGLUnavailable, sceneKey]);
 
   // Trigger layer animation when activeAnimation prop changes
   useEffect(() => {
@@ -920,6 +977,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
               onClick={() => applyCameraPreset(0)}
               className="p-1 text-slate-400 hover:text-cyan-300 transition-colors cursor-pointer"
               title="重置标准视角"
+              aria-label="重置标准视角"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
@@ -954,7 +1012,7 @@ export const Cube3DStage: React.FC<Cube3DStageProps> = ({
       {/* Three.js Canvas Mount */}
       <div
         ref={mountRef}
-        className="w-full h-full flex-1 cursor-grab active:cursor-grabbing"
+        className="w-full h-full flex-1 cursor-grab active:cursor-grabbing touch-none"
         data-testid="cube-3d-canvas"
       />
 

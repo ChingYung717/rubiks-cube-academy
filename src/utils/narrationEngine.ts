@@ -6,7 +6,7 @@ export function formatCubeCommentaryForSpeech(rawText: string): string {
   return (
     rawText
       // Remove decorative leading/inline emojis & variation selectors so TTS doesn't read emoji descriptions
-      .replace(/[🎉🎙️⚡💡⚠️✅✓⏱️🎲🎬🎮📚🧊📖🔊🔇🎯✨\uFE0F]/gu, '')
+      .replace(/[\p{Extended_Pictographic}✓\uFE0F\u200D]/gu, '')
       // Replace arrows with natural pauses
       .replace(/[→↔]/g, '，')
       // Replace degree symbols
@@ -14,10 +14,10 @@ export function formatCubeCommentaryForSpeech(rawText: string): string {
       .replace(/°/g, '度')
       // Replace tilde ranges (e.g. 1~3 次 -> 1到3 次)
       .replace(/(\d+)\s*[~～]\s*(\d+)/g, '$1到$2')
-      // Convert double-turn notation tokens (e.g. R2, U2, M2, R2', u2) into natural Chinese speech
-      .replace(/(?<![A-Za-z0-9_])([RLUDFBrludfbMESxyz])2['’]?(?![A-Za-z0-9_])/g, '$1二')
-      // Convert prime/counter-clockwise notation tokens (e.g. R', U', F', r') into natural Chinese speech
-      .replace(/(?<![A-Za-z0-9_])([RLUDFBrludfbMESxyz])['’]/g, '$1撇')
+      // Convert double-turn notation tokens (e.g. R2, U2, M2, R2', u2, Rw2) into natural Chinese speech
+      .replace(/(?<![A-Za-z0-9_])([RLUDFB]w|[RLUDFBrludfbMESxyz])2['’′]?(?![A-Za-z0-9_])/g, '$1二')
+      // Convert prime/counter-clockwise notation tokens (e.g. R', U', F', r', Rw') into natural Chinese speech
+      .replace(/(?<![A-Za-z0-9_])([RLUDFB]w|[RLUDFBrludfbMESxyz])['’′]/g, '$1撇')
       // Replace hyphens between Chinese characters or notation tokens so TTS doesn't read "减"
       .replace(/([\u4e00-\u9fa5])\s*-\s*(?=[\u4e00-\u9fa5])/g, '$1、')
       .replace(/([A-Za-z0-9二撇])\s*-\s*(?=[A-Za-z0-9\u4e00-\u9fa5])/g, '$1 ')
@@ -36,6 +36,23 @@ class NarrationEngine {
   private listeners = new Set<NarrationListener>();
   private fallbackTimer: number | null = null;
   private activeSessionId = 0;
+
+  constructor() {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.getVoices();
+        window.speechSynthesis.addEventListener?.('voiceschanged', () => {
+          try {
+            window.speechSynthesis.getVoices();
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   public setEnabled(val: boolean): void {
     this.enabled = val;
@@ -173,9 +190,15 @@ class NarrationEngine {
 
     // Max safety timeout in case browser TTS hangs without firing onend
     const maxTimeoutMs = Math.min(
-      12000,
-      Math.max(1800, Math.round((spokenText.length * 210) / rate))
+      60000,
+      Math.max(3500, Math.round((spokenText.length * 280) / rate) + 2000)
     );
+
+    const scheduleWatchdog = (ms: number) => {
+      if (typeof window === 'undefined') return;
+      this.clearTimer();
+      this.fallbackTimer = window.setTimeout(finishOnce, ms);
+    };
 
     const handleSpeechEndOrError = () => {
       if (finished || sessionId !== this.activeSessionId) return;
@@ -207,11 +230,16 @@ class NarrationEngine {
           utterance.voice = zhVoice;
         }
 
+        utterance.onboundary = () => {
+          if (!finished && sessionId === this.activeSessionId) {
+            scheduleWatchdog(maxTimeoutMs);
+          }
+        };
         utterance.onend = handleSpeechEndOrError;
         utterance.onerror = handleSpeechEndOrError;
 
         window.speechSynthesis.speak(utterance);
-        this.fallbackTimer = window.setTimeout(finishOnce, maxTimeoutMs);
+        scheduleWatchdog(maxTimeoutMs);
         return;
       } catch {
         // Fallback to simulated timer below

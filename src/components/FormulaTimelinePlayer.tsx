@@ -185,6 +185,7 @@ export const FormulaTimelinePlayer: React.FC<FormulaTimelinePlayerProps> = ({
                   disabled={isAnimating || currentStep === 0}
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 disabled:opacity-40 border border-slate-700/70 transition-colors cursor-pointer"
                   title="回到初始状态 (Step 0)"
+                  aria-label="回到初始状态 (Step 0)"
                   data-testid="btn-timeline-first"
                 >
                   <ChevronFirst className="w-4 h-4" />
@@ -231,6 +232,7 @@ export const FormulaTimelinePlayer: React.FC<FormulaTimelinePlayerProps> = ({
                   disabled={isAnimating || currentStep >= moves.length}
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 disabled:opacity-40 border border-slate-700/70 transition-colors cursor-pointer"
                   title="跳到完成状态"
+                  aria-label="跳到完成状态"
                   data-testid="btn-timeline-last"
                 >
                   <ChevronLast className="w-4 h-4" />
